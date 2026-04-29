@@ -1,0 +1,16 @@
+{
+  "name": "provisioning-engine",
+  "version": "1.0.0",
+  "description": "Node.js provisioning engine using verus-typescript-primitives",
+  "main": "src/index.js",
+
+  "scripts": {
+    "build-challenge": "node src/build-challenge.js",
+    "sign-challenge": "node src/sign-challenge.js",
+    "verify-request": "node src/verify-request.js",
+    "build-response": "node src/build-response.js"
+  },
+  "dependencies": {
+    "verus-typescript-primitives": "git+https://github.com/VerusCoin/verus-typescript-primitives.git#78d431a16caa648fd671826912d0100b472eb921"
+  }
+}

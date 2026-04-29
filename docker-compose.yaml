@@ -1,0 +1,47 @@
+services:
+  svc-provisioning:
+    build:
+      context: ../svc-provisioning
+    container_name: syncpass-svc-provisioning
+    restart: unless-stopped
+    ports:
+      - "5055:5055"
+    environment:
+      - PORT=5055
+      - NODE_BIN=node
+      - PROVISIONING_SCRIPT_ROOT=/workspace/svc-idcreate/provisioning
+    volumes:
+      - ..:/workspace:ro
+
+  idcreate-api:
+    image: ${IMAGE_TAG:-registry.syncproof.net/sf/svc-idcreate:latest}
+    container_name: syncpass-idcreate-api
+    restart: unless-stopped
+    ports:
+      - "5003:5003"
+    env_file:
+      - .env
+    environment:
+      - UV_LINK_MODE=copy
+      - REGISTRAR_DB_PATH=/data/registrar.db
+    volumes:
+      - idcreate_data:/data
+    command: uv run fastapi run id_create_service.py --port 5003 --host 0.0.0.0
+
+  idcreate-worker:
+    image: ${IMAGE_TAG:-registry.syncproof.net/sf/svc-idcreate:latest}
+    container_name: syncpass-idcreate-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - UV_LINK_MODE=copy
+      - REGISTRAR_DB_PATH=/data/registrar.db
+      - WORKER_POLL_INTERVAL_SECONDS=15
+    volumes:
+      - idcreate_data:/data
+    command: /bin/sh -c "while true; do uv run python worker.py; sleep ${WORKER_POLL_INTERVAL_SECONDS:-15}; done"
+
+volumes:
+  idcreate_data:
+

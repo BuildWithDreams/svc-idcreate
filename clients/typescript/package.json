@@ -1,0 +1,14 @@
+{
+  "name": "idcreate-typescript-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "example": "tsx examples/createAndPoll.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.20.5",
+    "typescript": "^5.8.3"
+  }
+}

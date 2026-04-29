@@ -1,0 +1,121 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  # Tag the image with the commit hash for uniqueness, and 'latest' for convenience
+  IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  LATEST_TAG: $CI_REGISTRY_IMAGE:latest
+
+# ==========================================
+# 1. TEST STAGE
+# ==========================================
+unit_tests:
+  stage: test
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  script:
+    - echo "🚀 Setting up Environment..."
+    - uv sync --frozen
+    - echo "🧪 Running Tests..."
+    - uv run pytest -q
+  only:
+    - main
+    - merge_requests
+
+# ==========================================
+# 2. BUILD STAGE
+# ==========================================
+build_push_docker:
+  stage: build
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+#  services:
+#    - docker:24.0.5-dind
+  before_script:
+    # 1. Install curl (needed to download the binary)
+    - apt-get update -qy && apt-get install -y curl
+
+    # 2. Download the latest Docker Client Static Binary (v27.x stable)
+    #    (This is a single file, ~50MB, usually downloads fine)
+    - curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.3.1.tgz -o docker.tgz
+    
+    # 3. Extract and install it
+    - tar -xzf docker.tgz
+    - mv docker/docker /usr/local/bin/docker
+    - rm -rf docker docker.tgz
+    - chmod +x /usr/local/bin/docker
+
+    # 4. Verify it works (Should show Client: v27.x and Server: v29.x)
+    - docker version
+    - echo "🐳 Logging into GitLab Registry..."
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker info
+    - echo "🏗️ Building Docker Image..."
+    - docker build -t $IMAGE_TAG -t $LATEST_TAG .
+    - echo "KX Pushing to Registry..."
+    - docker push $IMAGE_TAG
+    - docker push $LATEST_TAG
+  only:
+    - main
+
+# ==========================================
+# 3. DEPLOY STAGE
+# ==========================================
+deploy_production:
+  stage: deploy
+  image: kroniak/ssh-client # Lightweight image with SSH pre-installed
+  before_script:
+    # Setup SSH Key securely
+    #- mkdir -p ~/.ssh
+    #- echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    #- chmod 600 ~/.ssh/id_rsa
+    #- ssh-keyscan -H $SSH_HOST >> ~/.ssh/known_hosts
+    # 2. Start SSH Agent
+    - eval $(ssh-agent -s)
+    # 3. Add the key (Handles Ed25519 automatically)
+    #    'tr -d \r' removes hidden Windows carriage returns that cause the "libcrypto" error
+    # - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    # - printf "%s\n" "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - echo "$SSH_PRIVATE_KEY" > /tmp/deploy_key
+    # 4. Create .ssh folder and disable host key checking (simplest for CI)
+    #    (Or use ssh-keyscan if you want to be stricter)
+    - chmod 600 /tmp/deploy_key
+    # - cat /tmp/deploy_key
+    - ssh-add /tmp/deploy_key
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+    # 1. Copy the compose file to the server using SCP
+    #    (This sends the file from the Runner to the Server)
+    - scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null docker-compose.yaml $SSH_USER@$SSH_HOST:/home/$SSH_USER/dev/sf/svc-idcreate/docker-compose.yaml
+  script:
+    - echo "🚀 Deploying to Production Server..."
+    - |
+      ssh $SSH_USER@$SSH_HOST "
+        # 1. Navigate to app directory
+        cd /home/$SSH_USER/dev/sf/svc-idcreate &&
+        
+        # 2. Login to GitLab Registry
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+        
+        # 3. Update .env file from CI variables (Optional but recommended)
+        echo \"$ENV_FILE\" > .env &&
+        # 3b. Explicitly append the Image Tag
+        #    (We use the variable from CI, not a shell variable on the server)
+        echo "IMAGE_TAG=$IMAGE_TAG" >> .env &&
+        
+        # 4. Pull the new images
+        docker-compose pull idcreate-api idcreate-worker &&
+        
+        # 5. Restart services
+        docker-compose up -d --force-recreate idcreate-api idcreate-worker &&
+        
+        # 6. Clean up old images to save space
+        docker image prune -f
+      "
+  only:
+    - main
+
+
+

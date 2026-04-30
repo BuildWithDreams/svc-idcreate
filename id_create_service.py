@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Query
+from fastapi import Request
 from fastapi import Security
 from fastapi import status
+from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
@@ -337,6 +339,19 @@ def _init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_storage_chunks_upload_id ON storage_chunks(upload_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_storage_chunks_status ON storage_chunks(status)")
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_name TEXT,
+            signature TEXT,
+            payload_json TEXT NOT NULL,
+            received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_events(received_at)")
+
     conn.commit()
     conn.close()
 
@@ -377,6 +392,52 @@ def _resolve_daemon_by_native_coin(native_coin: str) -> str | None:
         if ticker.upper() == requested_ticker and daemon_name in DAEMON_CONFIGS:
             return daemon_name
     return None
+
+
+def _allowed_parent_namespaces() -> set[str]:
+    configured: set[str] = set()
+
+    # Backward-compatible single preset parent.
+    for env_name in ("REGISTRAR_ALLOWED_PARENT", "PARENT"):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            configured.add(value.lower())
+
+    # Preferred comma-separated allowlist.
+    raw_list = os.getenv("REGISTRAR_ALLOWED_PARENTS", "").strip()
+    if raw_list:
+        configured.update(item.strip().lower() for item in raw_list.split(",") if item.strip())
+
+    return configured
+
+
+def _store_webhook_event(event_name: str | None, signature: str | None, payload: dict | list | str) -> None:
+    payload_json = json.dumps(payload)
+    conn = _get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO webhook_events (event_name, signature, payload_json)
+        VALUES (?, ?, ?)
+        """,
+        (event_name, signature, payload_json),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _list_webhook_events(limit: int = 20) -> list[dict]:
+    conn = _get_db_connection()
+    rows = conn.execute(
+        """
+        SELECT id, event_name, signature, payload_json, received_at
+        FROM webhook_events
+        ORDER BY datetime(received_at) DESC, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def _select_storage_mode(payload_size_bytes: int) -> str:
@@ -534,6 +595,18 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
     source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
     if not source_of_funds:
         raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
+
+    allowed_parents = _allowed_parent_namespaces()
+    parent_normalized = request.parent.strip().lower()
+    if allowed_parents and parent_normalized not in allowed_parents:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "Requested parent namespace is not permitted.",
+                "requested_parent": request.parent,
+                "allowed_parents": sorted(allowed_parents),
+            },
+        )
 
     try:
         rpc_connection = _get_rpc_connection(daemon_name)
@@ -865,8 +938,225 @@ def read_root():
     """Simple root endpoint for basic connectivity checks."""
     return {"message": "Hello from the new pipeline!"}
 
+
+@app.get("/register", response_class=HTMLResponse, summary="Simple registration web form")
+def register_form():
+        allowed_parents = sorted(_allowed_parent_namespaces())
+        parent_select_options = "\n".join(
+                f'<option value="{parent}">{parent}</option>' for parent in allowed_parents
+        )
+        parent_hint = (
+                "Parent is restricted by server configuration."
+                if allowed_parents
+                else "No parent allowlist configured; any parent is accepted."
+        )
+
+        parent_input_html = (
+                f'<select id="parent" name="parent" required>{parent_select_options}</select>'
+                if allowed_parents
+                else '<input id="parent" name="parent" placeholder="bitcoins.vrsc" required />'
+        )
+
+        html = f"""
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>ID Create Registration</title>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+            :root {{
+                --bg: #f6f4ee;
+                --panel: #fffdf8;
+                --ink: #1f2a23;
+                --accent: #0d7a43;
+                --accent-2: #de7a00;
+                --line: #d8d0be;
+            }}
+            * {{ box-sizing: border-box; }}
+            body {{
+                margin: 0;
+                min-height: 100vh;
+                font-family: 'Space Grotesk', sans-serif;
+                background: radial-gradient(circle at 85% 15%, #ffe6bf 0%, transparent 45%),
+                                        radial-gradient(circle at 10% 90%, #c7f2d8 0%, transparent 40%),
+                                        var(--bg);
+                color: var(--ink);
+                display: grid;
+                place-items: center;
+                padding: 1.25rem;
+            }}
+            .shell {{
+                width: min(760px, 100%);
+                background: var(--panel);
+                border: 1px solid var(--line);
+                border-radius: 18px;
+                box-shadow: 0 18px 45px rgba(31, 42, 35, 0.12);
+                overflow: hidden;
+            }}
+            .mast {{
+                padding: 1.1rem 1.25rem;
+                background: linear-gradient(100deg, #d7f0dd 0%, #fff4db 100%);
+                border-bottom: 1px solid var(--line);
+            }}
+            h1 {{ margin: 0; font-size: clamp(1.3rem, 2.5vw, 1.8rem); }}
+            .meta {{ margin-top: .35rem; font-size: .9rem; opacity: .85; }}
+            form {{
+                padding: 1.25rem;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                gap: .85rem;
+            }}
+            label {{ font-size: .82rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }}
+            input, select {{
+                width: 100%;
+                margin-top: .35rem;
+                border: 1px solid #bdc7b8;
+                border-radius: 10px;
+                padding: .62rem .72rem;
+                font: 500 .95rem 'IBM Plex Mono', monospace;
+                background: #fff;
+            }}
+            .full {{ grid-column: 1 / -1; }}
+            button {{
+                border: none;
+                border-radius: 12px;
+                padding: .8rem 1rem;
+                font: 700 .95rem 'Space Grotesk', sans-serif;
+                background: linear-gradient(120deg, var(--accent), #0ca25a);
+                color: #fff;
+                cursor: pointer;
+            }}
+            #result {{
+                margin: 0 1.25rem 1.25rem;
+                border: 1px solid var(--line);
+                border-radius: 10px;
+                padding: .8rem;
+                background: #fff;
+                font: 400 .88rem 'IBM Plex Mono', monospace;
+                white-space: pre-wrap;
+                min-height: 4rem;
+            }}
+            a {{ color: #8f4f00; font-weight: 700; }}
+        </style>
+    </head>
+    <body>
+        <div class="shell">
+            <div class="mast">
+                <h1>Async Registration Console</h1>
+                <div class="meta">{parent_hint} Check webhook receipts at <a href="/webhooks/registration-callback">/webhooks/registration-callback</a>.</div>
+            </div>
+            <form id="register-form">
+                <label>Name<input id="name" name="name" placeholder="alice" required /></label>
+                <label>Parent{parent_input_html}</label>
+                <label>Native Coin<input id="native_coin" name="native_coin" value="VRSC" required /></label>
+                <label>Primary R-Address<input id="primary_raddress" name="primary_raddress" placeholder="RaliceAddress" required /></label>
+                <label class="full">API Key (X-API-Key)<input id="api_key" name="api_key" autocomplete="off" required /></label>
+                <label class="full">Webhook URL<input id="webhook_url" name="webhook_url" /></label>
+                <label class="full">Webhook Secret (optional)<input id="webhook_secret" name="webhook_secret" autocomplete="off" /></label>
+                <button class="full" type="submit">Submit Registration</button>
+            </form>
+            <pre id="result">Waiting for submission...</pre>
+        </div>
+        <script>
+            const hookInput = document.getElementById('webhook_url');
+            hookInput.value = `${{window.location.origin}}/webhooks/registration-callback`;
+
+            document.getElementById('register-form').addEventListener('submit', async (event) => {{
+                event.preventDefault();
+                const payload = {{
+                    name: document.getElementById('name').value.trim(),
+                    parent: document.getElementById('parent').value.trim(),
+                    native_coin: document.getElementById('native_coin').value.trim(),
+                    primary_raddress: document.getElementById('primary_raddress').value.trim(),
+                    webhook_url: hookInput.value.trim() || null,
+                    webhook_secret: document.getElementById('webhook_secret').value.trim() || null,
+                }};
+
+                const res = await fetch('/api/register', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                        'X-API-Key': document.getElementById('api_key').value.trim(),
+                    }},
+                    body: JSON.stringify(payload),
+                }});
+
+                const body = await res.json().catch(() => ({{ error: 'Failed to parse response body.' }}));
+                document.getElementById('result').textContent = JSON.stringify({{ status: res.status, body }}, null, 2);
+            }});
+        </script>
+    </body>
+</html>
+"""
+        return HTMLResponse(content=html)
+
+
+@app.post("/webhooks/registration-callback", summary="Simple webhook receiver for registration events")
+async def registration_webhook_callback(request: Request):
+        payload: dict | list | str
+        try:
+                payload = await request.json()
+        except Exception:
+                payload = (await request.body()).decode("utf-8", errors="replace")
+
+        _store_webhook_event(
+                event_name=request.headers.get("X-Webhook-Event"),
+                signature=request.headers.get("X-Webhook-Signature"),
+                payload=payload,
+        )
+        return {"ok": True}
+
+
+@app.get("/webhooks/registration-callback", response_class=HTMLResponse, summary="Webhook receipts viewer")
+def registration_webhook_viewer(limit: int = Query(default=20, ge=1, le=200)):
+        events = _list_webhook_events(limit=limit)
+        cards = []
+        for event in events:
+                cards.append(
+                        (
+                                '<article><h3>'
+                                + (event.get("event_name") or "(no event header)")
+                                + '</h3><p><strong>received_at:</strong> '
+                                + str(event.get("received_at"))
+                                + '<br /><strong>signature:</strong> '
+                                + str(event.get("signature") or "(none)")
+                                + '</p><pre>'
+                                + event.get("payload_json", "")
+                                + "</pre></article>"
+                        )
+                )
+
+        html = """
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Webhook Receipts</title>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400&display=swap');
+            body { margin: 0; padding: 1rem; font-family: 'Space Grotesk', sans-serif; background: #fff8eb; color: #2b2215; }
+            h1 { margin: 0 0 .4rem; }
+            .meta { margin-bottom: 1rem; }
+            article { border: 1px solid #d6c4a7; border-radius: 12px; background: #fff; padding: .8rem; margin-bottom: .75rem; }
+            h3 { margin: 0 0 .4rem; color: #835200; }
+            p { margin: 0 0 .55rem; font-size: .9rem; }
+            pre { margin: 0; overflow: auto; background: #f8f3ea; border-radius: 8px; border: 1px solid #e8dfd1; padding: .65rem; font: .84rem 'IBM Plex Mono', monospace; }
+        </style>
+    </head>
+    <body>
+        <h1>Webhook Receipts</h1>
+        <div class="meta">Showing latest deliveries posted to <code>/webhooks/registration-callback</code>.</div>
+        __CARDS__
+    </body>
+</html>
+"""
+        return HTMLResponse(content=html.replace("__CARDS__", "".join(cards) if cards else "<p>No webhook events received yet.</p>"))
+
 # 3. An echo endpoint to test data
 @app.get("/items/{item_id}")
-def read_item(item_id: int, q: str = None):
+def read_item(item_id: int, q: str | None = None):
     """Echo test endpoint returning path and optional query parameters."""
     return {"item_id": item_id, "q": q}

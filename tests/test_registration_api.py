@@ -91,6 +91,47 @@ def test_register_returns_503_for_unknown_native_coin(monkeypatch, tmp_path):
     assert resp.status_code == 503
 
 
+def test_register_rejects_parent_not_in_allowlist(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setenv("REGISTRAR_ALLOWED_PARENTS", "bitcoins.vrsc,private.vrsc")
+
+    payload = {
+        "name": "alice",
+        "parent": "untrusted.vrsc",
+        "native_coin": "VRSC",
+        "primary_raddress": "RaliceAddress",
+    }
+    resp = client.post(
+        "/api/register",
+        json=payload,
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["requested_parent"] == "untrusted.vrsc"
+    assert "bitcoins.vrsc" in detail["allowed_parents"]
+
+
+def test_register_accepts_parent_from_parent_env(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setenv("PARENT", "bitcoins.vrsc")
+
+    payload = {
+        "name": "alice",
+        "parent": "bitcoins.vrsc",
+        "native_coin": "VRSC",
+        "primary_raddress": "RaliceAddress",
+    }
+    resp = client.post(
+        "/api/register",
+        json=payload,
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 202
+
+
 
 def test_status_returns_saved_registration(monkeypatch, tmp_path):
     client = next(_build_client(monkeypatch, tmp_path))

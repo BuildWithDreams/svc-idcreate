@@ -597,7 +597,7 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
         raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
 
     allowed_parents = _allowed_parent_namespaces()
-    parent_normalized = request.parent.strip().lower()
+    parent_normalized = request.parent.strip()
     if allowed_parents and parent_normalized not in allowed_parents:
         raise HTTPException(
             status_code=403,

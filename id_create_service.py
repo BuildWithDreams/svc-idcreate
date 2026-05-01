@@ -401,12 +401,12 @@ def _allowed_parent_namespaces() -> set[str]:
     for env_name in ("REGISTRAR_ALLOWED_PARENT", "PARENT"):
         value = os.getenv(env_name, "").strip()
         if value:
-            configured.add(value.lower())
+            configured.add(value)
 
     # Preferred comma-separated allowlist.
     raw_list = os.getenv("REGISTRAR_ALLOWED_PARENTS", "").strip()
     if raw_list:
-        configured.update(item.strip().lower() for item in raw_list.split(",") if item.strip())
+        configured.update(item.strip() for item in raw_list.split(",") if item.strip())
 
     return configured
 

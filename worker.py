@@ -13,6 +13,32 @@ import id_create_service
 logger = logging.getLogger(__name__)
 
 
+def _to_log_dict(row: sqlite3.Row | dict[str, Any] | None, redacted_keys: set[str] | None = None) -> dict[str, Any]:
+    if row is None:
+        return {}
+
+    if isinstance(row, sqlite3.Row):
+        data = dict(row)
+    elif isinstance(row, dict):
+        data = dict(row)
+    else:
+        data = {"value": str(row)}
+
+    if redacted_keys:
+        for key in redacted_keys:
+            if key in data and data[key] is not None:
+                data[key] = "***REDACTED***"
+
+    return data
+
+
+def _log_json(data: Any) -> str:
+    try:
+        return json.dumps(data, sort_keys=True, default=str)
+    except Exception:
+        return str(data)
+
+
 def _get_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(id_create_service._get_db_path())
     conn.row_factory = sqlite3.Row
@@ -434,6 +460,7 @@ def process_once() -> int:
 
     Returns the number of rows that were advanced to the next state.
     """
+    logger.info("worker.process_once.start")
     conn = _get_db_connection()
     ready_rows = conn.execute(
         """
@@ -491,15 +518,40 @@ def process_once() -> int:
         """
     ).fetchall()
 
+    logger.info(
+        "worker.process_once.rows_loaded ready_for_idr=%s pending_rnc_confirm=%s idr_submitted=%s webhook_pending=%s",
+        len(ready_rows),
+        len(pending_rows),
+        len(submitted_rows),
+        len(webhook_rows),
+    )
+
     updated_count = 0
     for row in pending_rows:
+        logger.debug(
+            "worker.process_once.pending_rnc_confirm.check row=%s",
+            _log_json(_to_log_dict(row)),
+        )
         try:
             rpc = _get_rpc_connection(row["daemon_name"])
             tx = rpc.get_raw_transaction(row["rnc_txid"])
             confirmations = 0
             if isinstance(tx, dict):
                 confirmations = tx.get("confirmations", 0)
+            logger.debug(
+                "worker.process_once.pending_rnc_confirm.rpc_response request_id=%s rnc_txid=%s confirmations=%s tx=%s",
+                row["id"],
+                row["rnc_txid"],
+                confirmations,
+                _log_json(tx),
+            )
         except Exception as exc:
+            logger.exception(
+                "worker.process_once.pending_rnc_confirm.rpc_error request_id=%s daemon=%s rnc_txid=%s",
+                row["id"],
+                row["daemon_name"],
+                row["rnc_txid"],
+            )
             _record_retry_or_failure(conn, row["id"], row["attempts"], str(exc), "pending_rnc_confirm")
             updated_count += 1
             continue
@@ -513,14 +565,37 @@ def process_once() -> int:
                 """,
                 ("ready_for_idr", row["id"]),
             )
+            logger.info(
+                "worker.process_once.pending_rnc_confirm.promoted request_id=%s from=pending_rnc_confirm to=ready_for_idr confirmations=%s",
+                row["id"],
+                confirmations,
+            )
             updated_count += 1
+        else:
+            logger.debug(
+                "worker.process_once.pending_rnc_confirm.waiting request_id=%s confirmations=%s",
+                row["id"],
+                confirmations,
+            )
 
     for row in ready_rows:
+        logger.debug(
+            "worker.process_once.ready_for_idr.start row=%s",
+            _log_json(_to_log_dict(row)),
+        )
         rpc = _get_rpc_connection(row["daemon_name"])
         rnc_payload = json.loads(row["rnc_payload_json"])
         full_name = f'{row["requested_name"]}.{row["parent_namespace"]}'
         identity_payload = _build_identity_payload(full_name, row["primary_raddress"])
         fee_offer = _resolve_fee_offer(rpc, row["parent_namespace"])
+        logger.debug(
+            "worker.process_once.ready_for_idr.computed request_id=%s full_name=%s rnc_payload=%s identity_payload=%s fee_offer=%s",
+            row["id"],
+            full_name,
+            _log_json(rnc_payload),
+            _log_json(identity_payload),
+            fee_offer,
+        )
 
         try:
             txid = rpc.register_identity(
@@ -528,6 +603,11 @@ def process_once() -> int:
                 identity_payload,
                 row["source_of_funds"],
                 fee_offer,
+            )
+            logger.info(
+                "worker.process_once.ready_for_idr.submitted request_id=%s to=idr_submitted idr_txid=%s",
+                row["id"],
+                txid,
             )
             conn.execute(
                 """
@@ -538,17 +618,40 @@ def process_once() -> int:
                 ("idr_submitted", txid, row["id"]),
             )
         except Exception as exc:
+            logger.exception(
+                "worker.process_once.ready_for_idr.submit_error request_id=%s daemon=%s full_name=%s",
+                row["id"],
+                row["daemon_name"],
+                full_name,
+            )
             _record_retry_or_failure(conn, row["id"], row["attempts"], str(exc), "ready_for_idr")
         updated_count += 1
 
     for row in submitted_rows:
+        logger.debug(
+            "worker.process_once.idr_submitted.check row=%s",
+            _log_json(_to_log_dict(row)),
+        )
         try:
             rpc = _get_rpc_connection(row["daemon_name"])
             tx = rpc.get_raw_transaction(row["idr_txid"])
             confirmations = 0
             if isinstance(tx, dict):
                 confirmations = tx.get("confirmations", 0)
+            logger.debug(
+                "worker.process_once.idr_submitted.rpc_response request_id=%s idr_txid=%s confirmations=%s tx=%s",
+                row["id"],
+                row["idr_txid"],
+                confirmations,
+                _log_json(tx),
+            )
         except Exception as exc:
+            logger.exception(
+                "worker.process_once.idr_submitted.rpc_error request_id=%s daemon=%s idr_txid=%s",
+                row["id"],
+                row["daemon_name"],
+                row["idr_txid"],
+            )
             _record_retry_or_failure(conn, row["id"], row["attempts"], str(exc), "idr_submitted")
             updated_count += 1
             continue
@@ -562,12 +665,27 @@ def process_once() -> int:
                 """,
                 ("complete", row["id"]),
             )
+            logger.info(
+                "worker.process_once.idr_submitted.completed request_id=%s from=idr_submitted to=complete confirmations=%s",
+                row["id"],
+                confirmations,
+            )
             updated_count += 1
+        else:
+            logger.debug(
+                "worker.process_once.idr_submitted.waiting request_id=%s confirmations=%s",
+                row["id"],
+                confirmations,
+            )
 
     webhook_timeout_seconds = int(os.getenv("WEBHOOK_TIMEOUT_SECONDS", "5"))
     fallback_secret = os.getenv("WEBHOOK_SIGNING_SECRET", "")
 
     for row in webhook_rows:
+        logger.debug(
+            "worker.process_once.webhook.start row=%s",
+            _log_json(_to_log_dict(row, redacted_keys={"webhook_secret"})),
+        )
         payload = {
             "event": f"registration.{row['status']}",
             "request_id": row["id"],
@@ -587,6 +705,18 @@ def process_once() -> int:
         if secret:
             headers["X-Webhook-Signature"] = _webhook_signature(secret, payload)
 
+        logger.debug(
+            "worker.process_once.webhook.prepared request_id=%s payload=%s headers=%s timeout_seconds=%s",
+            row["id"],
+            _log_json(payload),
+            _log_json({
+                "Content-Type": headers.get("Content-Type"),
+                "X-Webhook-Event": headers.get("X-Webhook-Event"),
+                "has_signature": "X-Webhook-Signature" in headers,
+            }),
+            webhook_timeout_seconds,
+        )
+
         try:
             _post_webhook(row["webhook_url"], payload, headers, webhook_timeout_seconds)
             conn.execute(
@@ -602,14 +732,32 @@ def process_once() -> int:
                 """,
                 (row["id"],),
             )
+            logger.info(
+                "worker.process_once.webhook.delivered request_id=%s url=%s status=%s",
+                row["id"],
+                row["webhook_url"],
+                row["status"],
+            )
         except Exception as exc:
+            logger.exception(
+                "worker.process_once.webhook.delivery_error request_id=%s url=%s",
+                row["id"],
+                row["webhook_url"],
+            )
             _record_webhook_retry_or_failure(conn, row["id"], row["webhook_attempts"], str(exc))
         updated_count += 1
 
+    logger.info("worker.process_once.commit updated_count=%s", updated_count)
     conn.commit()
     conn.close()
 
     storage_updated_count = process_storage_once()
+    logger.info(
+        "worker.process_once.finish updated_count=%s storage_updated_count=%s total=%s",
+        updated_count,
+        storage_updated_count,
+        updated_count + storage_updated_count,
+    )
     return updated_count + storage_updated_count
 
 

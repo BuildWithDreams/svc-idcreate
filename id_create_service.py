@@ -258,6 +258,7 @@ def _init_db():
             native_coin TEXT NOT NULL,
             daemon_name TEXT NOT NULL,
             primary_raddress TEXT NOT NULL,
+            control_address TEXT NOT NULL,
             source_of_funds TEXT NOT NULL,
             status TEXT NOT NULL,
             rnc_txid TEXT,
@@ -681,7 +682,7 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
             _log_json(
                 {
                     "name": request.name,
-                    "primary_raddress": request.primary_raddress,
+                    "control_address": source_of_funds,
                     "parent": request.parent,
                     "source_of_funds": _mask_value(source_of_funds),
                 }
@@ -690,7 +691,7 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
         rpc_connection = _get_rpc_connection(daemon_name)
         rnc_response = rpc_connection.register_name_commitment(
             request.name,
-            request.primary_raddress,
+            source_of_funds,
             "",
             request.parent,
             source_of_funds,
@@ -726,6 +727,7 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
                 "native_coin": request.native_coin,
                 "daemon_name": daemon_name,
                 "primary_raddress": request.primary_raddress,
+                "control_address": source_of_funds,
                 "source_of_funds": _mask_value(source_of_funds),
                 "status": "pending_rnc_confirm",
                 "rnc_txid": rnc_response.get("txid") if isinstance(rnc_response, dict) else None,
@@ -745,13 +747,14 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
             rnc_payload_json,
             webhook_url,
             webhook_secret
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             request_id,
@@ -760,6 +763,7 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
             request.native_coin,
             daemon_name,
             request.primary_raddress,
+            source_of_funds,
             source_of_funds,
             "pending_rnc_confirm",
             rnc_response.get("txid"),

@@ -30,6 +30,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _log_json(data) -> str:
+    try:
+        return json.dumps(data, sort_keys=True, default=str)
+    except Exception:
+        return str(data)
+
+
+def _redact_fields(data: dict, redacted_keys: set[str] | None = None) -> dict:
+    redacted = dict(data)
+    if not redacted_keys:
+        return redacted
+    for key in redacted_keys:
+        if key in redacted and redacted[key] is not None:
+            redacted[key] = "***REDACTED***"
+    return redacted
+
+
+def _mask_value(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 10:
+        return "***MASKED***"
+    return f"{value[:6]}...{value[-4:]}"
+
+
 class RegisterRequest(BaseModel):
     name: str = Field(description="Identity name without parent namespace.", examples=["alice"])
     parent: str = Field(description="Parent namespace/currency name.", examples=["bitcoins.vrsc"])
@@ -367,6 +392,7 @@ def _init_db():
             native_coin TEXT NOT NULL,
             daemon_name TEXT NOT NULL,
             primary_raddress TEXT NOT NULL,
+            control_address TEXT NOT NULL,
             source_of_funds TEXT NOT NULL,
             status TEXT NOT NULL,
             rnc_txid TEXT,
@@ -578,12 +604,12 @@ def _allowed_parent_namespaces() -> set[str]:
     for env_name in ("REGISTRAR_ALLOWED_PARENT", "PARENT"):
         value = os.getenv(env_name, "").strip()
         if value:
-            configured.add(value.lower())
+            configured.add(value)
 
     # Preferred comma-separated allowlist.
     raw_list = os.getenv("REGISTRAR_ALLOWED_PARENTS", "").strip()
     if raw_list:
-        configured.update(item.strip().lower() for item in raw_list.split(",") if item.strip())
+        configured.update(item.strip() for item in raw_list.split(",") if item.strip())
 
     return configured
 
@@ -758,8 +784,24 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
     The endpoint returns immediately with a request id after broadcasting the
     name commitment transaction and storing the request in SQLite.
     """
+    logger.info(
+        "api.register.start payload=%s",
+        _log_json(
+            _redact_fields(
+                request.model_dump(),
+                redacted_keys={"webhook_secret"},
+            )
+        ),
+    )
+
     daemon_name = _resolve_daemon_by_native_coin(request.native_coin)
     if daemon_name is None:
+        logger.warning(
+            "api.register.daemon_unresolved native_coin=%s name=%s parent=%s",
+            request.native_coin,
+            request.name,
+            request.parent,
+        )
         raise HTTPException(
             status_code=503,
             detail={
@@ -769,13 +811,38 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
             },
         )
 
+    logger.info(
+        "api.register.daemon_resolved native_coin=%s daemon=%s",
+        request.native_coin,
+        daemon_name,
+    )
+
     source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
     if not source_of_funds:
+        logger.error("api.register.source_of_funds_missing daemon=%s", daemon_name)
         raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
 
+    logger.debug(
+        "api.register.source_of_funds_resolved daemon=%s source_of_funds=%s",
+        daemon_name,
+        _mask_value(source_of_funds),
+    )
+
     allowed_parents = _allowed_parent_namespaces()
-    parent_normalized = request.parent.strip().lower()
+    parent_normalized = request.parent.strip()
+    logger.debug(
+        "api.register.parent_validation requested_parent=%s normalized_parent=%s allowed_parents=%s",
+        request.parent,
+        parent_normalized,
+        _log_json(sorted(allowed_parents)),
+    )
+
     if allowed_parents and parent_normalized not in allowed_parents:
+        logger.warning(
+            "api.register.parent_denied requested_parent=%s allowed_parents=%s",
+            request.parent,
+            _log_json(sorted(allowed_parents)),
+        )
         raise HTTPException(
             status_code=403,
             detail={
@@ -786,18 +853,67 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
         )
 
     try:
+        logger.debug(
+            "api.register.rpc_name_commitment.request daemon=%s request=%s",
+            daemon_name,
+            _log_json(
+                {
+                    "name": request.name,
+                    "control_address": source_of_funds,
+                    "parent": request.parent,
+                    "source_of_funds": _mask_value(source_of_funds),
+                }
+            ),
+        )
         rpc_connection = _get_rpc_connection(daemon_name)
         rnc_response = rpc_connection.register_name_commitment(
             request.name,
-            request.primary_raddress,
+            source_of_funds,
             "",
             request.parent,
             source_of_funds,
         )
+        logger.info(
+            "api.register.rpc_name_commitment.success daemon=%s txid=%s",
+            daemon_name,
+            rnc_response.get("txid") if isinstance(rnc_response, dict) else None,
+        )
+        logger.debug(
+            "api.register.rpc_name_commitment.response daemon=%s response=%s",
+            daemon_name,
+            _log_json(rnc_response),
+        )
     except Exception as e:
+        logger.exception(
+            "api.register.rpc_name_commitment.error daemon=%s name=%s parent=%s",
+            daemon_name,
+            request.name,
+            request.parent,
+        )
         raise HTTPException(status_code=503, detail=f"RPC error during name commitment: {e}")
 
     request_id = str(uuid.uuid4())
+    logger.debug(
+        "api.register.db_insert.prepared request_id=%s values=%s",
+        request_id,
+        _log_json(
+            {
+                "id": request_id,
+                "requested_name": request.name,
+                "parent_namespace": request.parent,
+                "native_coin": request.native_coin,
+                "daemon_name": daemon_name,
+                "primary_raddress": request.primary_raddress,
+                "control_address": source_of_funds,
+                "source_of_funds": _mask_value(source_of_funds),
+                "status": "pending_rnc_confirm",
+                "rnc_txid": rnc_response.get("txid") if isinstance(rnc_response, dict) else None,
+                "has_webhook_url": bool(request.webhook_url),
+                "has_webhook_secret": bool(request.webhook_secret),
+            }
+        ),
+    )
+
     conn = _get_db_connection()
     conn.execute(
         """
@@ -808,13 +924,14 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
             rnc_payload_json,
             webhook_url,
             webhook_secret
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             request_id,
@@ -823,6 +940,7 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
             request.native_coin,
             daemon_name,
             request.primary_raddress,
+            source_of_funds,
             source_of_funds,
             "pending_rnc_confirm",
             rnc_response.get("txid"),
@@ -833,6 +951,15 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
     )
     conn.commit()
     conn.close()
+
+    logger.info(
+        "api.register.success request_id=%s status=%s daemon=%s native_coin=%s txid_rnc=%s",
+        request_id,
+        "pending_rnc_confirm",
+        daemon_name,
+        request.native_coin,
+        rnc_response.get("txid") if isinstance(rnc_response, dict) else None,
+    )
 
     return {
         "request_id": request_id,

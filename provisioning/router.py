@@ -311,9 +311,9 @@ def submit_provisioning_request(
             """
             INSERT INTO registrations (
                 id, requested_name, parent_namespace, native_coin, daemon_name,
-                primary_raddress, source_of_funds, status,
+                primary_raddress, control_address, source_of_funds, status,
                 rnc_txid, rnc_payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request_id,
@@ -322,6 +322,7 @@ def submit_provisioning_request(
                 "VRSC",  # native_coin — TODO: resolve from system_id
                 daemon_name,
                 primary_raddress,
+                source_of_funds,
                 source_of_funds,
                 "pending_rnc_confirm",
                 rnc_response.get("txid"),

@@ -95,11 +95,12 @@ def _seed_registration(monkeypatch, tmp_path):
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
             rnc_payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "req-1",
@@ -108,6 +109,7 @@ def _seed_registration(monkeypatch, tmp_path):
             "VRSC",
             "verusd_vrsc",
             "Ralice",
+            "Rfunds",
             "Rfunds",
             "pending_rnc_confirm",
             "txid-rnc-1",
@@ -135,13 +137,14 @@ def _seed_pending_with_retry(monkeypatch, tmp_path, attempts=0, next_retry_at=No
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
             rnc_payload_json,
             attempts,
             next_retry_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "req-pending-retry",
@@ -150,6 +153,7 @@ def _seed_pending_with_retry(monkeypatch, tmp_path, attempts=0, next_retry_at=No
             "VRSC",
             "verusd_vrsc",
             "Ralice",
+            "Rfunds",
             "Rfunds",
             "pending_rnc_confirm",
             "txid-rnc-1",
@@ -179,11 +183,12 @@ def _seed_ready_for_idr(monkeypatch, tmp_path):
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
             rnc_payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "req-2",
@@ -192,6 +197,7 @@ def _seed_ready_for_idr(monkeypatch, tmp_path):
             "VRSC",
             "verusd_vrsc",
             "Ralice",
+            "Rfunds",
             "Rfunds",
             "ready_for_idr",
             "txid-rnc-1",
@@ -219,13 +225,14 @@ def _seed_ready_for_idr_with_retry(monkeypatch, tmp_path, attempts=0, next_retry
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
             rnc_payload_json,
             attempts,
             next_retry_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "req-retry",
@@ -234,6 +241,7 @@ def _seed_ready_for_idr_with_retry(monkeypatch, tmp_path, attempts=0, next_retry
             "VRSC",
             "verusd_vrsc",
             "Ralice",
+            "Rfunds",
             "Rfunds",
             "ready_for_idr",
             "txid-rnc-1",
@@ -263,12 +271,13 @@ def _seed_idr_submitted(monkeypatch, tmp_path):
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
             rnc_payload_json,
             idr_txid
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "req-3",
@@ -277,6 +286,7 @@ def _seed_idr_submitted(monkeypatch, tmp_path):
             "VRSC",
             "verusd_vrsc",
             "Ralice",
+            "Rfunds",
             "Rfunds",
             "idr_submitted",
             "txid-rnc-1",
@@ -305,6 +315,7 @@ def _seed_idr_submitted_with_retry(monkeypatch, tmp_path, attempts=0, next_retry
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
@@ -312,7 +323,7 @@ def _seed_idr_submitted_with_retry(monkeypatch, tmp_path, attempts=0, next_retry
             idr_txid,
             attempts,
             next_retry_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "req-submitted-retry",
@@ -321,6 +332,7 @@ def _seed_idr_submitted_with_retry(monkeypatch, tmp_path, attempts=0, next_retry
             "VRSC",
             "verusd_vrsc",
             "Ralice",
+            "Rfunds",
             "Rfunds",
             "idr_submitted",
             "txid-rnc-1",
@@ -356,6 +368,7 @@ def _seed_complete_with_webhook(
             native_coin,
             daemon_name,
             primary_raddress,
+            control_address,
             source_of_funds,
             status,
             rnc_txid,
@@ -366,7 +379,7 @@ def _seed_complete_with_webhook(
             webhook_delivered,
             webhook_attempts,
             webhook_next_retry_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "req-webhook-complete",
@@ -375,6 +388,7 @@ def _seed_complete_with_webhook(
             "VRSC",
             "verusd_vrsc",
             "Ralice",
+            "Rfunds",
             "Rfunds",
             "complete",
             "txid-rnc-1",

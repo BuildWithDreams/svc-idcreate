@@ -243,11 +243,11 @@ class NodeRpc:
         return result
 
 
-    def register_name_commitment(self, name, primary_raddress, referral_id, parent="VRSC", source_of_funds="*"):
+    def register_name_commitment(self, name, control_address, referral_id, parent="VRSC", source_of_funds="*"):
         self.get_info()
-        print(f"{name}, {primary_raddress}, {referral_id}, {parent}, {source_of_funds}")
+        print(f"{name}, {control_address}, {referral_id}, {parent}, {source_of_funds}")
         try:
-            result = self.rpc_connection.registernamecommitment(name, primary_raddress, referral_id, parent, source_of_funds)
+            result = self.rpc_connection.registernamecommitment(name, control_address, referral_id, parent, source_of_funds)
         except Exception as e:
             raise Exception(f"Error with registering name commitment: {e}")
         return result

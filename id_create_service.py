@@ -57,6 +57,85 @@ class StorageUploadRequest(BaseModel):
     chunk_size_bytes: int = 999000
 
 
+class ReserveCurrencySpec(BaseModel):
+    name: str = Field(description="Reserve currency name.", examples=["TENNIS"])
+    supply: float = Field(description="Reserve token total supply to preallocate.", examples=[80000])
+    weight: float = Field(description="Fractional basket reserve weight.", examples=[0.25])
+    initial_contribution: float = Field(description="Initial contribution sent into the fractional identity.", examples=[40000])
+
+
+class FractionalNativeContribution(BaseModel):
+    name: str = Field(description="Native coin ticker for basket composition.", examples=["VRSCTEST"])
+    weight: float = Field(description="Native coin reserve weight.", examples=[0.5])
+    initial_contribution: float = Field(description="Native coin initial contribution amount.", examples=[20])
+
+
+class CreateSimpleCurrencyRequest(BaseModel):
+    name: str = Field(description="Currency/identity name without parent namespace.", examples=["TENNIS"])
+    parent: str = Field(description="Parent namespace/currency name.", examples=["bitcoins.vrsc"])
+    native_coin: str = Field(description="Ticker used to resolve enabled daemon.", examples=["VRSC"])
+    primary_raddress: str = Field(description="Primary R-address for identity control.", examples=["RaliceAddress"])
+    pre_allocation_id: str = Field(default="blockoneminer@", description="Identity receiving pre-allocation.")
+    pre_allocation_amount: float = Field(description="Amount preallocated to pre_allocation_id.", examples=[80000])
+    id_registration_fees: float = Field(default=25, description="ID registration fee for definecurrency payload.")
+    proof_protocol: int = Field(default=1, description="Proof protocol for definecurrency payload.")
+    define_options: int = Field(default=32, description="Currency options field for simple token definition.")
+    define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to <name>@ before definecurrency.")
+
+
+class CreateFractionalCurrencyRequest(BaseModel):
+    name: str = Field(description="Fractional currency/identity name without parent namespace.", examples=["SIXTH"])
+    parent: str = Field(description="Parent namespace/currency name.", examples=["bitcoins.vrsc"])
+    native_coin: str = Field(description="Ticker used to resolve enabled daemon.", examples=["VRSC"])
+    primary_raddress: str = Field(description="Primary R-address for identity control.", examples=["RaliceAddress"])
+    initial_supply: float = Field(description="Initial fractional supply.", examples=[100000])
+    id_registration_fees: float = Field(default=50, description="ID registration fees for definecurrency payload.")
+    id_referral_levels: int = Field(default=0, description="ID referral levels for definecurrency payload.")
+    start_block: int = Field(description="Start block for fractional currency launch.", examples=[28000])
+    native: FractionalNativeContribution = Field(description="Native reserve contribution details.")
+    reserves: list[ReserveCurrencySpec] = Field(default_factory=list, description="Reserve token definitions.")
+    allocation_id: str = Field(default="blockoneminer@", description="Identity used for reserve preallocations and reserve funding.")
+    define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
+    create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
+    prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
+
+
+class CurrencySimplePlan(BaseModel):
+    pre_allocation_id: str = Field(default="blockoneminer@", description="Identity receiving pre-allocation.")
+    pre_allocation_amount: float = Field(description="Amount preallocated to pre_allocation_id.", examples=[80000])
+    id_registration_fees: float = Field(default=25, description="ID registration fee for definecurrency payload.")
+    proof_protocol: int = Field(default=1, description="Proof protocol for definecurrency payload.")
+    define_options: int = Field(default=32, description="Currency options field for simple token definition.")
+    define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to <name>@ before definecurrency.")
+
+
+class CurrencyFractionalPlan(BaseModel):
+    initial_supply: float = Field(description="Initial fractional supply.", examples=[100000])
+    id_registration_fees: float = Field(default=50, description="ID registration fees for definecurrency payload.")
+    id_referral_levels: int = Field(default=0, description="ID referral levels for definecurrency payload.")
+    start_block: int = Field(description="Start block for fractional currency launch.", examples=[28000])
+    native: FractionalNativeContribution = Field(description="Native reserve contribution details.")
+    reserves: list[ReserveCurrencySpec] = Field(default_factory=list, description="Reserve token definitions.")
+    allocation_id: str = Field(default="blockoneminer@", description="Identity used for reserve preallocations and reserve funding.")
+    define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
+    create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
+    prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
+
+
+class CreateCurrencyPlanRequest(BaseModel):
+    name: str = Field(description="Currency/identity name without parent namespace.", examples=["SIXTH"])
+    parent: str = Field(description="Parent namespace/currency name.", examples=["bitcoins.vrsc"])
+    native_coin: str = Field(description="Ticker used to resolve enabled daemon.", examples=["VRSC"])
+    primary_raddress: str = Field(description="Primary R-address for identity control.", examples=["RaliceAddress"])
+    mode: str | None = Field(
+        default="auto",
+        description="Workflow selector: auto, simple, simple_token, fractional, or fractional_token.",
+        examples=["auto"],
+    )
+    simple: CurrencySimplePlan | None = Field(default=None, description="Simple token plan section.")
+    fractional: CurrencyFractionalPlan | None = Field(default=None, description="Fractional reserve plan section.")
+
+
 def _get_db_path() -> str:
     return os.getenv("REGISTRAR_DB_PATH", "registrar.db")
 
@@ -152,6 +231,61 @@ def _create_storage_chunk_record(record: dict) -> None:
 def _get_storage_upload_record(upload_id: str) -> dict | None:
     conn = _get_db_connection()
     row = conn.execute("SELECT * FROM storage_uploads WHERE id = ?", (upload_id,)).fetchone()
+    conn.close()
+    return dict(row) if row is not None else None
+
+
+def _create_currency_request_record(record: dict) -> None:
+    conn = _get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO currency_requests (
+            id,
+            workflow_type,
+            requested_name,
+            parent_namespace,
+            native_coin,
+            daemon_name,
+            primary_raddress,
+            source_of_funds,
+            status,
+            payload_json,
+            progress_json,
+            step_index,
+            attempts,
+            next_retry_at,
+            error_message,
+            wait_type,
+            wait_value
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["id"],
+            record["workflow_type"],
+            record["requested_name"],
+            record["parent_namespace"],
+            record["native_coin"],
+            record["daemon_name"],
+            record["primary_raddress"],
+            record["source_of_funds"],
+            record.get("status", "pending"),
+            record["payload_json"],
+            record.get("progress_json", "{}"),
+            record.get("step_index", 0),
+            record.get("attempts", 0),
+            record.get("next_retry_at"),
+            record.get("error_message"),
+            record.get("wait_type"),
+            record.get("wait_value"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _get_currency_request_record(request_id: str) -> dict | None:
+    conn = _get_db_connection()
+    row = conn.execute("SELECT * FROM currency_requests WHERE id = ?", (request_id,)).fetchone()
     conn.close()
     return dict(row) if row is not None else None
 
@@ -280,6 +414,49 @@ def _init_db():
         conn.execute("ALTER TABLE registrations ADD COLUMN webhook_delivered_at TIMESTAMP")
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_registrations_status ON registrations(status)")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS currency_requests (
+            id TEXT PRIMARY KEY,
+            workflow_type TEXT NOT NULL,
+            requested_name TEXT NOT NULL,
+            parent_namespace TEXT NOT NULL,
+            native_coin TEXT NOT NULL,
+            daemon_name TEXT NOT NULL,
+            primary_raddress TEXT NOT NULL,
+            source_of_funds TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            progress_json TEXT NOT NULL DEFAULT '{}',
+            step_index INTEGER NOT NULL DEFAULT 0,
+            wait_type TEXT,
+            wait_value TEXT,
+            error_message TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    currency_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(currency_requests)").fetchall()
+    }
+    if "attempts" not in currency_columns:
+        conn.execute("ALTER TABLE currency_requests ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    if "next_retry_at" not in currency_columns:
+        conn.execute("ALTER TABLE currency_requests ADD COLUMN next_retry_at TIMESTAMP")
+    if "progress_json" not in currency_columns:
+        conn.execute("ALTER TABLE currency_requests ADD COLUMN progress_json TEXT NOT NULL DEFAULT '{}'")
+    if "step_index" not in currency_columns:
+        conn.execute("ALTER TABLE currency_requests ADD COLUMN step_index INTEGER NOT NULL DEFAULT 0")
+    if "wait_type" not in currency_columns:
+        conn.execute("ALTER TABLE currency_requests ADD COLUMN wait_type TEXT")
+    if "wait_value" not in currency_columns:
+        conn.execute("ALTER TABLE currency_requests ADD COLUMN wait_value TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_currency_requests_status ON currency_requests(status)")
 
     conn.execute(
         """
@@ -775,6 +952,343 @@ def list_recent_failures(
     }
 
 
+def _build_currency_request_response(request_id: str, status: str, workflow_type: str, daemon_name: str, native_coin: str):
+    return {
+        "request_id": request_id,
+        "status": status,
+        "workflow_type": workflow_type,
+        "daemon": daemon_name,
+        "native_coin": native_coin,
+    }
+
+
+def _validate_currency_parent_or_403(parent: str):
+    allowed_parents = _allowed_parent_namespaces()
+    parent_normalized = parent.strip().lower()
+    if allowed_parents and parent_normalized not in allowed_parents:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "Requested parent namespace is not permitted.",
+                "requested_parent": parent,
+                "allowed_parents": sorted(allowed_parents),
+            },
+        )
+
+
+def _resolve_currency_daemon_or_503(native_coin: str) -> str:
+    daemon_name = _resolve_daemon_by_native_coin(native_coin)
+    if daemon_name is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "native_coin": native_coin,
+                "error": "No enabled daemon configured for requested native coin.",
+            },
+        )
+    return daemon_name
+
+
+def _enqueue_simple_currency_request(
+    *,
+    name: str,
+    parent: str,
+    native_coin: str,
+    primary_raddress: str,
+    daemon_name: str,
+    source_of_funds: str,
+    plan: CurrencySimplePlan,
+) -> dict:
+    request_id = str(uuid.uuid4())
+    payload = {
+        "name": name,
+        "parent": parent,
+        "native_coin": native_coin,
+        "primary_raddress": primary_raddress,
+        "pre_allocation_id": plan.pre_allocation_id,
+        "pre_allocation_amount": plan.pre_allocation_amount,
+        "id_registration_fees": plan.id_registration_fees,
+        "proof_protocol": plan.proof_protocol,
+        "define_options": plan.define_options,
+        "define_funding_amount": plan.define_funding_amount,
+    }
+    _create_currency_request_record(
+        {
+            "id": request_id,
+            "workflow_type": "simple_token",
+            "requested_name": name,
+            "parent_namespace": parent,
+            "native_coin": native_coin,
+            "daemon_name": daemon_name,
+            "primary_raddress": primary_raddress,
+            "source_of_funds": source_of_funds,
+            "status": "pending",
+            "payload_json": json.dumps(payload),
+            "progress_json": json.dumps({}),
+        }
+    )
+
+    return _build_currency_request_response(request_id, "pending", "simple_token", daemon_name, native_coin)
+
+
+def _enqueue_fractional_currency_request(
+    *,
+    name: str,
+    parent: str,
+    native_coin: str,
+    primary_raddress: str,
+    daemon_name: str,
+    source_of_funds: str,
+    plan: CurrencyFractionalPlan,
+) -> dict:
+    request_id = str(uuid.uuid4())
+    payload = {
+        "name": name,
+        "parent": parent,
+        "native_coin": native_coin,
+        "primary_raddress": primary_raddress,
+        "initial_supply": plan.initial_supply,
+        "id_registration_fees": plan.id_registration_fees,
+        "id_referral_levels": plan.id_referral_levels,
+        "start_block": plan.start_block,
+        "native": plan.native.model_dump(),
+        "reserves": [reserve.model_dump() for reserve in plan.reserves],
+        "allocation_id": plan.allocation_id,
+        "define_funding_amount": plan.define_funding_amount,
+        "create_reserves": plan.create_reserves,
+        "prepare_fractional_identity": plan.prepare_fractional_identity,
+    }
+
+    _create_currency_request_record(
+        {
+            "id": request_id,
+            "workflow_type": "fractional_token",
+            "requested_name": name,
+            "parent_namespace": parent,
+            "native_coin": native_coin,
+            "daemon_name": daemon_name,
+            "primary_raddress": primary_raddress,
+            "source_of_funds": source_of_funds,
+            "status": "pending",
+            "payload_json": json.dumps(payload),
+            "progress_json": json.dumps({"reserve_index": 0, "reserve_phase": 0, "fund_index": 0}),
+        }
+    )
+
+    return _build_currency_request_response(request_id, "pending", "fractional_token", daemon_name, native_coin)
+
+
+def _currency_plan_template(mode: str = "auto") -> dict:
+    simple_template = {
+        "pre_allocation_id": "blockoneminer@",
+        "pre_allocation_amount": 80000,
+        "id_registration_fees": 25,
+        "proof_protocol": 1,
+        "define_options": 32,
+        "define_funding_amount": 200.001,
+    }
+
+    fractional_template = {
+        "initial_supply": 100000,
+        "id_registration_fees": 50,
+        "id_referral_levels": 0,
+        "start_block": 28000,
+        "native": {
+            "name": "VRSCTEST",
+            "weight": 0.5,
+            "initial_contribution": 20,
+        },
+        "reserves": [
+            {
+                "name": "TENNIS",
+                "supply": 80000,
+                "weight": 0.25,
+                "initial_contribution": 40000,
+            },
+            {
+                "name": "SAILING",
+                "supply": 80000,
+                "weight": 0.25,
+                "initial_contribution": 40000,
+            },
+        ],
+        "allocation_id": "blockoneminer@",
+        "define_funding_amount": 200.001,
+        "create_reserves": True,
+        "prepare_fractional_identity": True,
+    }
+
+    template = {
+        "name": "SIXTH",
+        "parent": "bitcoins.vrsc",
+        "native_coin": "VRSC",
+        "primary_raddress": "R...",
+        "mode": mode,
+    }
+
+    normalized_mode = mode.strip().lower()
+    if normalized_mode in {"simple", "simple_token"}:
+        template["mode"] = "simple_token"
+        template["simple"] = simple_template
+    elif normalized_mode in {"fractional", "fractional_token"}:
+        template["mode"] = "fractional_token"
+        template["fractional"] = fractional_template
+    else:
+        template["mode"] = "auto"
+        template["simple"] = simple_template
+        template["fractional"] = fractional_template
+
+    return template
+
+
+@app.post("/api/currency/simple", status_code=202, summary="Start asynchronous simple token currency creation")
+def create_simple_currency(request: CreateSimpleCurrencyRequest, api_key: str = Security(_require_api_key)):
+    daemon_name = _resolve_currency_daemon_or_503(request.native_coin)
+    _validate_currency_parent_or_403(request.parent)
+
+    source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
+    if not source_of_funds:
+        raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
+
+    simple_plan = CurrencySimplePlan(
+        pre_allocation_id=request.pre_allocation_id,
+        pre_allocation_amount=request.pre_allocation_amount,
+        id_registration_fees=request.id_registration_fees,
+        proof_protocol=request.proof_protocol,
+        define_options=request.define_options,
+        define_funding_amount=request.define_funding_amount,
+    )
+    return _enqueue_simple_currency_request(
+        name=request.name,
+        parent=request.parent,
+        native_coin=request.native_coin,
+        primary_raddress=request.primary_raddress,
+        daemon_name=daemon_name,
+        source_of_funds=source_of_funds,
+        plan=simple_plan,
+    )
+
+
+@app.post("/api/currency/fractional", status_code=202, summary="Start asynchronous fractional reserve currency creation")
+def create_fractional_currency(request: CreateFractionalCurrencyRequest, api_key: str = Security(_require_api_key)):
+    daemon_name = _resolve_currency_daemon_or_503(request.native_coin)
+    _validate_currency_parent_or_403(request.parent)
+
+    source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
+    if not source_of_funds:
+        raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
+
+    fractional_plan = CurrencyFractionalPlan(
+        initial_supply=request.initial_supply,
+        id_registration_fees=request.id_registration_fees,
+        id_referral_levels=request.id_referral_levels,
+        start_block=request.start_block,
+        native=request.native,
+        reserves=request.reserves,
+        allocation_id=request.allocation_id,
+        define_funding_amount=request.define_funding_amount,
+        create_reserves=request.create_reserves,
+        prepare_fractional_identity=request.prepare_fractional_identity,
+    )
+    return _enqueue_fractional_currency_request(
+        name=request.name,
+        parent=request.parent,
+        native_coin=request.native_coin,
+        primary_raddress=request.primary_raddress,
+        daemon_name=daemon_name,
+        source_of_funds=source_of_funds,
+        plan=fractional_plan,
+    )
+
+
+@app.post("/api/currency/plan", status_code=202, summary="Start asynchronous currency creation from a unified plan object")
+def create_currency_from_plan(request: CreateCurrencyPlanRequest, api_key: str = Security(_require_api_key)):
+    daemon_name = _resolve_currency_daemon_or_503(request.native_coin)
+    _validate_currency_parent_or_403(request.parent)
+
+    source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
+    if not source_of_funds:
+        raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
+
+    mode = (request.mode or "auto").strip().lower()
+    if mode in {"auto", ""}:
+        if request.fractional is not None:
+            mode = "fractional_token"
+        elif request.simple is not None:
+            mode = "simple_token"
+        else:
+            raise HTTPException(status_code=400, detail="Plan mode auto requires either 'simple' or 'fractional' section")
+    elif mode == "simple":
+        mode = "simple_token"
+    elif mode == "fractional":
+        mode = "fractional_token"
+
+    if mode == "simple_token":
+        if request.simple is None:
+            raise HTTPException(status_code=400, detail="mode simple_token requires 'simple' section")
+        return _enqueue_simple_currency_request(
+            name=request.name,
+            parent=request.parent,
+            native_coin=request.native_coin,
+            primary_raddress=request.primary_raddress,
+            daemon_name=daemon_name,
+            source_of_funds=source_of_funds,
+            plan=request.simple,
+        )
+
+    if mode == "fractional_token":
+        if request.fractional is None:
+            raise HTTPException(status_code=400, detail="mode fractional_token requires 'fractional' section")
+        return _enqueue_fractional_currency_request(
+            name=request.name,
+            parent=request.parent,
+            native_coin=request.native_coin,
+            primary_raddress=request.primary_raddress,
+            daemon_name=daemon_name,
+            source_of_funds=source_of_funds,
+            plan=request.fractional,
+        )
+
+    raise HTTPException(status_code=400, detail="mode must be one of: auto, simple, simple_token, fractional, fractional_token")
+
+
+@app.get("/api/currency/plan/template", summary="Get a reference currency plan template payload")
+def get_currency_plan_template(
+    mode: str = Query(
+        default="auto",
+        description="Template mode: auto, simple, simple_token, fractional, or fractional_token.",
+    )
+):
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"auto", "simple", "simple_token", "fractional", "fractional_token"}:
+        raise HTTPException(status_code=400, detail="mode must be one of: auto, simple, simple_token, fractional, fractional_token")
+
+    return {
+        "mode": normalized_mode,
+        "template": _currency_plan_template(normalized_mode),
+        "notes": [
+            "Submit this object to POST /api/currency/plan with X-API-Key header.",
+            "In auto mode, the API picks fractional when 'fractional' is present, otherwise simple when 'simple' is present.",
+        ],
+    }
+
+
+@app.get("/api/currency/status/{request_id}", summary="Get currency creation request status")
+def get_currency_status(request_id: str):
+    row = _get_currency_request_record(request_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Currency request not found")
+
+    payload = row.get("payload_json")
+    progress = row.get("progress_json")
+    if payload:
+        row["payload"] = json.loads(payload)
+    if progress:
+        row["progress"] = json.loads(progress)
+    return row
+
+
 @app.post("/api/storage/upload", status_code=202, summary="Create storage upload request")
 def create_storage_upload(request: StorageUploadRequest, api_key: str = Security(_require_api_key)):
     allowed_base_dir = _storage_allowed_base_dir()
@@ -1086,6 +1600,198 @@ def register_form():
                 const body = await res.json().catch(() => ({{ error: 'Failed to parse response body.' }}));
                 document.getElementById('result').textContent = JSON.stringify({{ status: res.status, body }}, null, 2);
             }});
+        </script>
+    </body>
+</html>
+"""
+        return HTMLResponse(content=html)
+
+
+@app.get("/currency/plan", response_class=HTMLResponse, summary="Reference web form for unified currency plan submission")
+def currency_plan_form():
+        allowed_parents = sorted(_allowed_parent_namespaces())
+        parent_options = "\n".join(f'<option value="{parent}">{parent}</option>' for parent in allowed_parents)
+
+        parent_input = (
+                f'<select id="parent" name="parent" required>{parent_options}</select>'
+                if allowed_parents
+                else '<input id="parent" name="parent" value="bitcoins.vrsc" required />'
+        )
+
+        html = f"""
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Currency Plan Console</title>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+            :root {{
+                --bg: #f6f4ee;
+                --panel: #fffdf8;
+                --ink: #1f2a23;
+                --accent: #0d7a43;
+                --line: #d8d0be;
+            }}
+            * {{ box-sizing: border-box; }}
+            body {{
+                margin: 0;
+                min-height: 100vh;
+                font-family: 'Space Grotesk', sans-serif;
+                background: radial-gradient(circle at 12% 12%, #ffe6bf 0%, transparent 45%),
+                                        radial-gradient(circle at 92% 88%, #c7f2d8 0%, transparent 40%),
+                                        var(--bg);
+                color: var(--ink);
+                display: grid;
+                place-items: center;
+                padding: 1.2rem;
+            }}
+            .shell {{
+                width: min(980px, 100%);
+                background: var(--panel);
+                border: 1px solid var(--line);
+                border-radius: 18px;
+                box-shadow: 0 18px 45px rgba(31, 42, 35, 0.12);
+                overflow: hidden;
+            }}
+            .mast {{
+                padding: 1rem 1.2rem;
+                background: linear-gradient(100deg, #d7f0dd 0%, #fff4db 100%);
+                border-bottom: 1px solid var(--line);
+            }}
+            h1 {{ margin: 0; font-size: clamp(1.2rem, 2.3vw, 1.7rem); }}
+            .meta {{ margin-top: .3rem; font-size: .9rem; opacity: .85; }}
+            form {{
+                padding: 1.1rem 1.2rem;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                gap: .8rem;
+            }}
+            label {{ font-size: .82rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }}
+            input, select, textarea {{
+                width: 100%;
+                margin-top: .35rem;
+                border: 1px solid #bdc7b8;
+                border-radius: 10px;
+                padding: .62rem .72rem;
+                font: 500 .92rem 'IBM Plex Mono', monospace;
+                background: #fff;
+            }}
+            textarea {{ min-height: 280px; resize: vertical; }}
+            .full {{ grid-column: 1 / -1; }}
+            .row {{ display: flex; gap: .6rem; align-items: end; flex-wrap: wrap; }}
+            button {{
+                border: none;
+                border-radius: 12px;
+                padding: .78rem 1rem;
+                font: 700 .92rem 'Space Grotesk', sans-serif;
+                background: linear-gradient(120deg, var(--accent), #0ca25a);
+                color: #fff;
+                cursor: pointer;
+            }}
+            button.secondary {{ background: #2f3e35; }}
+            #result {{
+                margin: 0 1.2rem 1.2rem;
+                border: 1px solid var(--line);
+                border-radius: 10px;
+                padding: .8rem;
+                background: #fff;
+                font: 400 .85rem 'IBM Plex Mono', monospace;
+                white-space: pre-wrap;
+                min-height: 4rem;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="shell">
+            <div class="mast">
+                <h1>Currency Plan Console</h1>
+                <div class="meta">Reference UI for POST /api/currency/plan and GET /api/currency/status/&lt;request_id&gt;.</div>
+            </div>
+            <form id="currency-plan-form">
+                <label>Name<input id="name" name="name" value="SIXTH" required /></label>
+                <label>Parent{parent_input}</label>
+                <label>Native Coin<input id="native_coin" name="native_coin" value="VRSC" required /></label>
+                <label>Primary R-Address<input id="primary_raddress" name="primary_raddress" placeholder="R..." required /></label>
+                <label>Mode
+                    <select id="mode" name="mode">
+                        <option value="auto">auto</option>
+                        <option value="simple_token">simple_token</option>
+                        <option value="fractional_token">fractional_token</option>
+                    </select>
+                </label>
+                <label>API Key (X-API-Key)<input id="api_key" name="api_key" autocomplete="off" required /></label>
+                <label class="full">Plan JSON
+                    <textarea id="plan_json" name="plan_json" spellcheck="false"></textarea>
+                </label>
+                <div class="full row">
+                    <button type="button" class="secondary" id="load_template">Load Template</button>
+                    <button type="submit">Submit Plan</button>
+                </div>
+            </form>
+            <pre id="result">Waiting for template load...</pre>
+        </div>
+        <script>
+            async function loadTemplate() {{
+                const mode = document.getElementById('mode').value;
+                const response = await fetch(`/api/currency/plan/template?mode=${{encodeURIComponent(mode)}}`);
+                const data = await response.json();
+                const template = data.template || {{}};
+                template.name = document.getElementById('name').value.trim() || template.name || 'SIXTH';
+                template.parent = document.getElementById('parent').value.trim() || template.parent || 'bitcoins.vrsc';
+                template.native_coin = document.getElementById('native_coin').value.trim() || template.native_coin || 'VRSC';
+                template.primary_raddress = document.getElementById('primary_raddress').value.trim() || template.primary_raddress || 'R...';
+                template.mode = mode;
+                document.getElementById('plan_json').value = JSON.stringify(template, null, 2);
+                document.getElementById('result').textContent = 'Template loaded.';
+            }}
+
+            document.getElementById('load_template').addEventListener('click', async () => {{
+                try {{
+                    await loadTemplate();
+                }} catch (error) {{
+                    document.getElementById('result').textContent = `Template load failed: ${{error}}`;
+                }}
+            }});
+
+            document.getElementById('mode').addEventListener('change', async () => {{
+                try {{
+                    await loadTemplate();
+                }} catch (error) {{
+                    document.getElementById('result').textContent = `Template load failed: ${{error}}`;
+                }}
+            }});
+
+            document.getElementById('currency-plan-form').addEventListener('submit', async (event) => {{
+                event.preventDefault();
+                let payload = {{}};
+                try {{
+                    payload = JSON.parse(document.getElementById('plan_json').value);
+                }} catch (error) {{
+                    document.getElementById('result').textContent = `Invalid JSON: ${{error}}`;
+                    return;
+                }}
+
+                payload.name = document.getElementById('name').value.trim();
+                payload.parent = document.getElementById('parent').value.trim();
+                payload.native_coin = document.getElementById('native_coin').value.trim();
+                payload.primary_raddress = document.getElementById('primary_raddress').value.trim();
+                payload.mode = document.getElementById('mode').value;
+
+                const res = await fetch('/api/currency/plan', {{
+                    method: 'POST',
+                    headers: {{
+                        'Content-Type': 'application/json',
+                        'X-API-Key': document.getElementById('api_key').value.trim(),
+                    }},
+                    body: JSON.stringify(payload),
+                }});
+                const body = await res.json().catch(() => ({{ error: 'Failed to parse response body.' }}));
+                document.getElementById('result').textContent = JSON.stringify({{ status: res.status, body }}, null, 2);
+            }});
+
+            loadTemplate();
         </script>
     </body>
 </html>

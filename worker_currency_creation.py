@@ -704,6 +704,13 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         native = payload["native"]
         reserves = payload.get("reserves", [])
         target_identity = f"{name}@"
+        pending_funding_waits = progress.setdefault("pending_funding_waits", [])
+
+        def _record_pending_wait(wait: tuple[str, str] | None):
+            if wait is None:
+                return
+            wait_type, wait_value = wait
+            pending_funding_waits.append({"wait_type": wait_type, "wait_value": wait_value})
 
         # Submit all needed top-ups in one sweep (no per-transfer confirmation wait).
         while True:
@@ -717,21 +724,10 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                     requested_amount=float(payload["define_funding_amount"]),
                     source_identity=payload["primary_raddress"],
                     context_hint="fractional identity definecurrency funding",
-                    wait_for_confirmation=False,
+                    wait_for_confirmation=True,
                 )
                 progress["define_funding_checked"] = True
-                if wait is not None:
-                    wait_type, wait_value = wait
-                    _save_currency_state(
-                        conn,
-                        row["id"],
-                        status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
-                        step_index=4,
-                        progress=progress,
-                        wait_type=wait_type,
-                        wait_value=wait_value,
-                    )
-                    return
+                _record_pending_wait(wait)
                 continue
 
             if fund_index == 0:
@@ -742,22 +738,11 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                     requested_amount=native["initial_contribution"],
                     source_identity=payload["primary_raddress"],
                     context_hint="native contribution before fractional definecurrency",
-                    wait_for_confirmation=False,
+                    wait_for_confirmation=True,
                 )
                 contributions["native"] = native_amount
                 progress["effective_initial_contributions"] = contributions
-                if wait is not None:
-                    wait_type, wait_value = wait
-                    _save_currency_state(
-                        conn,
-                        row["id"],
-                        status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
-                        step_index=4,
-                        progress=progress,
-                        wait_type=wait_type,
-                        wait_value=wait_value,
-                    )
-                    return
+                _record_pending_wait(wait)
                 progress["fund_index"] = 1
                 continue
 
@@ -797,23 +782,12 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                         if create_reserves
                         else "reserve contribution with pre-existing reserve currency"
                     ),
-                    wait_for_confirmation=False,
+                    wait_for_confirmation=True,
                 )
                 reserve_effective = contributions.setdefault("reserves", {})
                 reserve_effective[reserve_name] = reserve_amount
                 progress["effective_initial_contributions"] = contributions
-                if wait is not None:
-                    wait_type, wait_value = wait
-                    _save_currency_state(
-                        conn,
-                        row["id"],
-                        status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
-                        step_index=4,
-                        progress=progress,
-                        wait_type=wait_type,
-                        wait_value=wait_value,
-                    )
-                    return
+                _record_pending_wait(wait)
                 progress["fund_index"] = fund_index + 1
                 continue
 
@@ -825,9 +799,49 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         reserves = payload.get("reserves", [])
         effective = progress.get("effective_initial_contributions", {})
         reserve_effective = effective.get("reserves", {}) if isinstance(effective.get("reserves"), dict) else {}
+        pending_funding_waits = progress.get("pending_funding_waits", []) if isinstance(progress.get("pending_funding_waits", []), list) else []
         epsilon = _amount_epsilon()
         native_effective = effective.get("native", native["initial_contribution"])
         initial_contributions = [native_effective]
+
+        # Do not define until all previously submitted funding sends are confirmed.
+        unresolved_waits: list[dict[str, str]] = []
+        for wait in pending_funding_waits:
+            if not isinstance(wait, dict):
+                continue
+            wait_type = wait.get("wait_type")
+            wait_value = wait.get("wait_value")
+            if not isinstance(wait_type, str) or not isinstance(wait_value, str) or not wait_value:
+                continue
+
+            if wait_type == "tx_confirm":
+                tx = rpc.get_raw_transaction(wait_value)
+                confirmations = tx.get("confirmations", 0) if isinstance(tx, dict) else 0
+                if confirmations <= 0:
+                    unresolved_waits.append({"wait_type": "tx_confirm", "wait_value": wait_value})
+                continue
+
+            if wait_type == "opid_txid":
+                txid = _poll_operation_for_txid(rpc, wait_value)
+                if not txid:
+                    unresolved_waits.append({"wait_type": "opid_txid", "wait_value": wait_value})
+                else:
+                    unresolved_waits.append({"wait_type": "tx_confirm", "wait_value": txid})
+                continue
+
+            unresolved_waits.append({"wait_type": wait_type, "wait_value": wait_value})
+
+        if unresolved_waits:
+            progress["pending_funding_waits"] = unresolved_waits
+            logger.info(
+                "currency.fractional.define.wait_funding_confirms request_id=%s pending_waits=%s",
+                row["id"],
+                len(unresolved_waits),
+            )
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
+            return
+
+        progress["pending_funding_waits"] = []
 
         # Ensure funding is actually visible on-chain before definecurrency.
         required_native_balance = _normalize_amount(max(float(payload["define_funding_amount"]), float(native_effective)))

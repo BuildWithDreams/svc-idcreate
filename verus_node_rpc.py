@@ -7,6 +7,16 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_log_json(data, max_len=6000):
+    try:
+        rendered = json.dumps(data, sort_keys=True, default=str)
+    except Exception:
+        rendered = str(data)
+    if len(rendered) > max_len:
+        return f"{rendered[:max_len]}...<truncated>"
+    return rendered
+
 # refactor/2025-1 consider error handling strategies
 # from retry import retry
 
@@ -199,24 +209,40 @@ class NodeRpc:
 
 
     def send_currency(self, from_address, params):
-        # print(from_address)
-        # print(params)
+        logger.info(
+            "rpc.sendcurrency.submit from_address=%s params=%s",
+            from_address,
+            _safe_log_json(params),
+        )
         try:
             send_currency_result = self.rpc_connection.sendcurrency(from_address, params)
         except Exception as e:
+            logger.exception(
+                "rpc.sendcurrency.error from_address=%s params=%s error_type=%s",
+                from_address,
+                _safe_log_json(params),
+                type(e).__name__,
+            )
             raise Exception(f"Error sending currency: {e}")
+        logger.info("rpc.sendcurrency.success from_address=%s result=%s", from_address, _safe_log_json(send_currency_result))
         return send_currency_result
 
 
     def send_currency_simple_to_identity(self, from_address, currency, identity, amount):
         params = [{"currency": currency, "address": identity, "amount": amount}]
-        print(params)
+        logger.info(
+            "rpc.sendcurrency.simple.submit from_address=%s currency=%s identity=%s amount=%s",
+            from_address,
+            currency,
+            identity,
+            amount,
+        )
         return self.send_currency(from_address, params)
 
 
     def send_currency_via(self, currency, convertto, via, amount, address):
         params = [{"currency": currency, "convertto": convertto, "via": via, "amount": amount, "address": address}]
-        print(f"send currency params: {params}")
+        logger.info("rpc.sendcurrency.via.submit params=%s", _safe_log_json(params))
         try:
             send_currency_result = self.send_currency(address, params)
         except Exception as e:
@@ -245,22 +271,36 @@ class NodeRpc:
 
     def register_name_commitment(self, name, control_address, referral_id, parent="VRSC", source_of_funds="*"):
         self.get_info()
-        print(f"{name}, {control_address}, {referral_id}, {parent}, {source_of_funds}")
+        logger.info(
+            "rpc.registernamecommitment.submit name=%s control_address=%s referral_id=%s parent=%s source_of_funds=%s",
+            name,
+            control_address,
+            referral_id,
+            parent,
+            source_of_funds,
+        )
         try:
             result = self.rpc_connection.registernamecommitment(name, control_address, referral_id, parent, source_of_funds)
         except Exception as e:
             raise Exception(f"Error with registering name commitment: {e}")
+        logger.info("rpc.registernamecommitment.success name=%s result=%s", name, _safe_log_json(result))
         return result
 
 
     def register_identity(self, json_namecommitment_response, json_identity, source_of_funds, fee_offer=80):
         # json_identity is an object added to the namecommitment result object as identity attribute
         json_namecommitment_response["identity"] = json_identity
-        print(json_namecommitment_response)
+        logger.info(
+            "rpc.registeridentity.submit fee_offer=%s source_of_funds=%s payload=%s",
+            fee_offer,
+            source_of_funds,
+            _safe_log_json(json_namecommitment_response),
+        )
         try:
             result = self.rpc_connection.registeridentity(json_namecommitment_response, False, fee_offer, source_of_funds)
         except Exception as e:
             raise Exception(f"Error with registering identity: {e}")
+        logger.info("rpc.registeridentity.success result=%s", _safe_log_json(result))
         return result
 
 
@@ -371,31 +411,48 @@ class NodeRpc:
 
 
     def define_currency(self, params):
+        logger.info("rpc.definecurrency.submit params=%s", _safe_log_json(params))
         try:
             result = self.rpc_connection.definecurrency(params)
         except Exception as e:
+            logger.exception(
+                "rpc.definecurrency.error params=%s error_type=%s",
+                _safe_log_json(params),
+                type(e).__name__,
+            )
             raise Exception(f"Error with define currency: {e}")
-        print(json.dumps(result))
+        logger.info("rpc.definecurrency.success result=%s", _safe_log_json(result))
         return self.broadcast(result["hex"])
 
 
     def define_simple_token_currency(self, options, name, id_registration_fees, pre_allocations, proof_protocol):
         params = {"options": options, "name": name, "idregistrationfees": id_registration_fees, "preallocations": pre_allocations, "proofprotocol": proof_protocol}
+        logger.info("rpc.definecurrency.simple.submit params=%s", _safe_log_json(params))
         try:
             result = self.rpc_connection.definecurrency(params)
         except Exception as e:
+            logger.exception(
+                "rpc.definecurrency.simple.error params=%s error_type=%s",
+                _safe_log_json(params),
+                type(e).__name__,
+            )
             raise Exception(f"Error with define simple token currency: {e}")
-        print(json.dumps(result))
+        logger.info("rpc.definecurrency.simple.success result=%s", _safe_log_json(result))
         return self.broadcast(result["hex"])
 
     def define_define_id_control_token(self, options, name, pre_allocations):
         params = {"options": options, "name": name, "preallocations": pre_allocations, "maxpreconversion": [0]}
-        # print(params)
+        logger.info("rpc.definecurrency.id_control.submit params=%s", _safe_log_json(params))
         try:
             result = self.rpc_connection.definecurrency(params)
         except Exception as e:
+            logger.exception(
+                "rpc.definecurrency.id_control.error params=%s error_type=%s",
+                _safe_log_json(params),
+                type(e).__name__,
+            )
             raise Exception(f"Error with define id control token currency: {e}")
-        print(json.dumps(result))
+        logger.info("rpc.definecurrency.id_control.success result=%s", _safe_log_json(result))
         return self.broadcast(result["hex"])
 
 

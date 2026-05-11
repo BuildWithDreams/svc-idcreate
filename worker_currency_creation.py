@@ -10,6 +10,16 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 
+def _safe_log_json(data: Any, max_len: int = 6000) -> str:
+    try:
+        rendered = json.dumps(data, sort_keys=True, default=str)
+    except Exception:
+        rendered = str(data)
+    if len(rendered) > max_len:
+        return f"{rendered[:max_len]}...<truncated>"
+    return rendered
+
+
 def _amount_decimals() -> int:
     raw = os.getenv("CURRENCY_AMOUNT_DECIMALS", "8")
     try:
@@ -303,6 +313,14 @@ def _ensure_initial_contribution(
         )
         return amount, None
 
+    logger.info(
+        "currency.rpc.send_currency_simple_to_identity.submit from=%s currency=%s to=%s amount=%s context=%s",
+        source_identity,
+        currency_name,
+        target_identity,
+        shortfall,
+        context_hint,
+    )
     result = rpc.send_currency_simple_to_identity(source_identity, currency_name, target_identity, shortfall)
     wait = _extract_operation_or_txid(result)
     logger.info(
@@ -327,6 +345,19 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
 
     if step == 0:
         logger.info("currency.simple.rnc.submit request_id=%s name=%s parent=%s", row["id"], name, parent)
+        logger.info(
+            "currency.rpc.register_name_commitment.submit request_id=%s params=%s",
+            row["id"],
+            _safe_log_json(
+                {
+                    "name": name,
+                    "control_address": payload["primary_raddress"],
+                    "referral_id": "",
+                    "parent": parent,
+                    "source_of_funds": row["source_of_funds"],
+                }
+            ),
+        )
         rnc_response = rpc.register_name_commitment(
             name,
             payload["primary_raddress"],
@@ -361,6 +392,19 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
             fee_offer,
             row["source_of_funds"],
         )
+        logger.info(
+            "currency.rpc.register_identity.submit request_id=%s full_name=%s params=%s",
+            row["id"],
+            full_name,
+            _safe_log_json(
+                {
+                    "rnc_payload": progress.get("rnc_payload", {}),
+                    "identity_payload": identity_payload,
+                    "source_of_funds": row["source_of_funds"],
+                    "fee_offer": fee_offer,
+                }
+            ),
+        )
         txid = rpc.register_identity(
             progress.get("rnc_payload", {}),
             identity_payload,
@@ -382,6 +426,18 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
         return
 
     if step == 2:
+        logger.info(
+            "currency.rpc.send_currency_simple_to_identity.submit request_id=%s params=%s",
+            row["id"],
+            _safe_log_json(
+                {
+                    "from_address": payload["primary_raddress"],
+                    "currency": payload["native_coin"],
+                    "identity": f"{name}@",
+                    "amount": payload["define_funding_amount"],
+                }
+            ),
+        )
         result = rpc.send_currency_simple_to_identity(
             payload["primary_raddress"],
             payload["native_coin"],
@@ -401,6 +457,19 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
         return
 
     if step == 3:
+        logger.info(
+            "currency.rpc.define_simple_token_currency.submit request_id=%s params=%s",
+            row["id"],
+            _safe_log_json(
+                {
+                    "options": payload["define_options"],
+                    "name": name,
+                    "id_registration_fees": payload["id_registration_fees"],
+                    "pre_allocations": [{payload["pre_allocation_id"]: payload["pre_allocation_amount"]}],
+                    "proof_protocol": payload["proof_protocol"],
+                }
+            ),
+        )
         txid = rpc.define_simple_token_currency(
             payload["define_options"],
             name,
@@ -474,6 +543,20 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
             reserve_name,
             parent,
         )
+        logger.info(
+            "currency.rpc.register_name_commitment.submit request_id=%s reserve=%s params=%s",
+            row["id"],
+            reserve_name,
+            _safe_log_json(
+                {
+                    "name": reserve_name,
+                    "control_address": payload["primary_raddress"],
+                    "referral_id": "",
+                    "parent": parent,
+                    "source_of_funds": row["source_of_funds"],
+                }
+            ),
+        )
         rnc_response = rpc.register_name_commitment(
             reserve_name,
             payload["primary_raddress"],
@@ -515,6 +598,19 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
             fee_offer,
             row["source_of_funds"],
         )
+        logger.info(
+            "currency.rpc.register_identity.submit request_id=%s reserve=%s params=%s",
+            row["id"],
+            reserve_name,
+            _safe_log_json(
+                {
+                    "rnc_payload": reserve_progress.get("rnc_payload", {}),
+                    "identity_payload": identity_payload,
+                    "source_of_funds": row["source_of_funds"],
+                    "fee_offer": fee_offer,
+                }
+            ),
+        )
         txid = rpc.register_identity(
             reserve_progress.get("rnc_payload", {}),
             identity_payload,
@@ -537,6 +633,19 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
         return
 
     if reserve_phase == 2:
+        logger.info(
+            "currency.rpc.send_currency_simple_to_identity.submit request_id=%s reserve=%s params=%s",
+            row["id"],
+            reserve_name,
+            _safe_log_json(
+                {
+                    "from_address": payload["primary_raddress"],
+                    "currency": payload["native_coin"],
+                    "identity": f"{reserve_name}@",
+                    "amount": payload["define_funding_amount"],
+                }
+            ),
+        )
         result = rpc.send_currency_simple_to_identity(
             payload["primary_raddress"],
             payload["native_coin"],
@@ -557,6 +666,20 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
         return
 
     if reserve_phase == 3:
+        logger.info(
+            "currency.rpc.define_simple_token_currency.submit request_id=%s reserve=%s params=%s",
+            row["id"],
+            reserve_name,
+            _safe_log_json(
+                {
+                    "options": 32,
+                    "name": reserve_name,
+                    "id_registration_fees": payload.get("id_registration_fees", 50),
+                    "pre_allocations": [{payload["allocation_id"]: reserve["supply"]}],
+                    "proof_protocol": 1,
+                }
+            ),
+        )
         txid = rpc.define_simple_token_currency(
             32,
             reserve_name,
@@ -615,6 +738,19 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             return
 
         logger.info("currency.fractional.rnc.submit request_id=%s name=%s parent=%s", row["id"], name, parent)
+        logger.info(
+            "currency.rpc.register_name_commitment.submit request_id=%s params=%s",
+            row["id"],
+            _safe_log_json(
+                {
+                    "name": name,
+                    "control_address": payload["primary_raddress"],
+                    "referral_id": "",
+                    "parent": parent,
+                    "source_of_funds": row["source_of_funds"],
+                }
+            ),
+        )
         rnc_response = rpc.register_name_commitment(
             name,
             payload["primary_raddress"],
@@ -653,6 +789,19 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             fee_offer,
             row["source_of_funds"],
         )
+        logger.info(
+            "currency.rpc.register_identity.submit request_id=%s full_name=%s params=%s",
+            row["id"],
+            full_name,
+            _safe_log_json(
+                {
+                    "rnc_payload": progress.get("fractional_rnc_payload", {}),
+                    "identity_payload": identity_payload,
+                    "source_of_funds": row["source_of_funds"],
+                    "fee_offer": fee_offer,
+                }
+            ),
+        )
         txid = rpc.register_identity(
             progress.get("fractional_rnc_payload", {}),
             identity_payload,
@@ -674,6 +823,18 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         return
 
     if step == 2:
+        logger.info(
+            "currency.rpc.send_currency_simple_to_identity.submit request_id=%s params=%s",
+            row["id"],
+            _safe_log_json(
+                {
+                    "from_address": payload["primary_raddress"],
+                    "currency": payload["native_coin"],
+                    "identity": f"{name}@",
+                    "amount": payload["define_funding_amount"],
+                }
+            ),
+        )
         result = rpc.send_currency_simple_to_identity(
             payload["primary_raddress"],
             payload["native_coin"],
@@ -890,6 +1051,11 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             "initialsupply": payload["initial_supply"],
         }
 
+        logger.info(
+            "currency.rpc.define_currency.submit request_id=%s params=%s",
+            row["id"],
+            _safe_log_json(options),
+        )
         txid = rpc.define_currency(options)
         if not isinstance(txid, str) or not txid:
             raise Exception("Fractional definecurrency did not return txid")
@@ -1024,6 +1190,12 @@ def process_currency_once(
                 row["workflow_type"],
                 row_status,
                 row["step_index"],
+            )
+            logger.error(
+                "currency.process.error.context request_id=%s payload=%s progress=%s",
+                row["id"],
+                _safe_log_json(_parse_json_or_empty(row["payload_json"])),
+                _safe_log_json(_parse_json_or_empty(row["progress_json"])),
             )
             _record_currency_retry_or_failure(
                 conn,

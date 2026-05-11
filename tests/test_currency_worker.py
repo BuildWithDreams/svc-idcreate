@@ -192,6 +192,40 @@ class _FakeFractionalIdentityExistsRpc:
         return "d" * 64
 
 
+class _FakeFractionalDustShortfallRpc:
+    def __init__(self):
+        self.sent_calls = []
+        self.balances = {
+            "RtestAddress": {
+                "VRSCTEST": 1000.0,
+            },
+            # Slightly below requested 20.0 to exercise dust shortfall handling.
+            "DPNK@": {
+                "VRSCTEST": 19.999999999,
+            },
+        }
+
+    def get_raw_transaction(self, txid, verbose=1):
+        return {"txid": txid, "confirmations": 1}
+
+    def get_currency(self, currency_name_or_id):
+        return {"idregistrationfees": 25}
+
+    def get_currency_balance(self, holder):
+        return dict(self.balances.get(holder, {}))
+
+    def send_currency_simple_to_identity(self, from_address, currency, identity, amount):
+        self.sent_calls.append((from_address, currency, identity, amount))
+        source_balances = self.balances.setdefault(from_address, {})
+        source_balances[currency] = float(source_balances.get(currency, 0.0)) - float(amount)
+        target_balances = self.balances.setdefault(identity, {})
+        target_balances[currency] = float(target_balances.get(currency, 0.0)) + float(amount)
+        return "c" * 64
+
+    def define_currency(self, options):
+        return "d" * 64
+
+
 def test_worker_advances_simple_currency_to_complete(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
@@ -444,3 +478,58 @@ def test_worker_fractional_skips_main_identity_creation_when_identity_exists(mon
     reserve_contribution_calls = [call for call in fake_rpc.sent_calls if call[1] == "SPORTS" and call[2] == "DPNK@"]
     assert reserve_contribution_calls
     assert all(call[0] == "RtestAddress" for call in reserve_contribution_calls)
+
+
+def test_worker_fractional_native_dust_shortfall_does_not_submit_send(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {
+                        "name": "VRSCTEST",
+                        "weight": 1.0,
+                        "initial_contribution": 20,
+                    },
+                    "reserves": [],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "prepare_fractional_identity": False,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+    request_id = resp.json()["request_id"]
+
+    fake_rpc = _FakeFractionalDustShortfallRpc()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    for _ in range(20):
+        worker.process_once()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT status, step_index FROM currency_requests WHERE id = ?", (request_id,)).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "complete"
+    assert row["step_index"] == 6
+    assert fake_rpc.sent_calls == []

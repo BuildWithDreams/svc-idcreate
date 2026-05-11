@@ -3,10 +3,36 @@ import logging
 import os
 import re
 import sqlite3
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable
 
 
 logger = logging.getLogger(__name__)
+
+
+def _amount_decimals() -> int:
+    raw = os.getenv("CURRENCY_AMOUNT_DECIMALS", "8")
+    try:
+        value = int(raw)
+    except Exception:
+        return 8
+    return 8 if value < 0 else value
+
+
+def _amount_epsilon() -> float:
+    raw = os.getenv("CURRENCY_AMOUNT_EPSILON", "1e-8")
+    try:
+        value = float(raw)
+    except Exception:
+        return 1e-8
+    return 1e-8 if value <= 0 else value
+
+
+def _normalize_amount(value: float) -> float:
+    decimals = _amount_decimals()
+    quant = Decimal("1").scaleb(-decimals)
+    normalized = Decimal(str(value)).quantize(quant, rounding=ROUND_DOWN)
+    return float(normalized)
 
 
 def _retry_config() -> tuple[int, int]:
@@ -187,7 +213,7 @@ def _is_hodling_supply(rpc: Any, currency_name_or_id: str, identity_name_or_id: 
 
     supply = state.get("supply")
     try:
-        supply_f = float(supply)
+        supply_f = float(0 if supply is None else supply)
     except Exception:
         return False
 
@@ -198,8 +224,8 @@ def _is_hodling_supply(rpc: Any, currency_name_or_id: str, identity_name_or_id: 
 def _effective_contribution_amount(rpc: Any, currency_name: str, identity_name_or_id: str, requested_amount: float) -> float:
     conversion_fee = float(os.getenv("CURRENCY_CONVERSION_PC_FEE", "0.00025"))
     if _is_hodling_supply(rpc, currency_name, identity_name_or_id):
-        return requested_amount * (1 - conversion_fee)
-    return requested_amount
+        return _normalize_amount(requested_amount * (1 - conversion_fee))
+    return _normalize_amount(requested_amount)
 
 
 def _ensure_initial_contribution(
@@ -211,6 +237,7 @@ def _ensure_initial_contribution(
     source_identity: str,
     context_hint: str | None = None,
 ) -> tuple[float, tuple[str, str] | None]:
+    epsilon = _amount_epsilon()
     amount = _effective_contribution_amount(rpc, currency_name, target_identity, requested_amount)
     current_target = _get_currency_balance_amount(rpc, target_identity, currency_name)
     logger.info(
@@ -223,7 +250,9 @@ def _ensure_initial_contribution(
         current_target,
         context_hint,
     )
-    if current_target >= amount:
+    shortfall_raw = amount - current_target
+    shortfall = _normalize_amount(shortfall_raw)
+    if shortfall <= epsilon:
         logger.info(
             "currency.contribution.satisfied currency=%s target=%s effective=%s current_target=%s context=%s",
             currency_name,
@@ -234,7 +263,6 @@ def _ensure_initial_contribution(
         )
         return amount, None
 
-    shortfall = amount - current_target
     source_balance = _get_currency_balance_amount(rpc, source_identity, currency_name)
     logger.info(
         "currency.contribution.shortfall currency=%s source=%s target=%s shortfall=%s source_balance=%s context=%s",
@@ -245,7 +273,7 @@ def _ensure_initial_contribution(
         source_balance,
         context_hint,
     )
-    if source_balance < shortfall:
+    if source_balance + epsilon < shortfall:
         exists = _currency_exists(rpc, currency_name)
         logger.error(
             "currency.contribution.insufficient currency=%s exists=%s source=%s source_balance=%s shortfall=%s target=%s context=%s",
@@ -261,6 +289,18 @@ def _ensure_initial_contribution(
             f"Insufficient source balance for {currency_name}: need {shortfall}, have {source_balance} at {source_identity}; "
             f"currency_exists={exists}; target={target_identity}; context={context_hint}"
         )
+
+    if shortfall <= epsilon:
+        logger.info(
+            "currency.contribution.skip_dust currency=%s source=%s target=%s shortfall=%s epsilon=%s context=%s",
+            currency_name,
+            source_identity,
+            target_identity,
+            shortfall,
+            epsilon,
+            context_hint,
+        )
+        return amount, None
 
     result = rpc.send_currency_simple_to_identity(source_identity, currency_name, target_identity, shortfall)
     logger.info(

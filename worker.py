@@ -292,6 +292,14 @@ def _get_currency_balance_amount(rpc: Any, holder: str, currency: str) -> float:
         return 0.0
 
 
+def _currency_exists(rpc: Any, currency_name_or_id: str) -> bool:
+    try:
+        result = rpc.get_currency(currency_name_or_id)
+        return isinstance(result, dict) and bool(result)
+    except Exception:
+        return False
+
+
 def _is_hodling_supply(rpc: Any, currency_name_or_id: str, identity_name_or_id: str) -> bool:
     currency_details = rpc.get_currency(currency_name_or_id)
     if not isinstance(currency_details, dict):
@@ -325,20 +333,69 @@ def _ensure_initial_contribution(
     currency_name: str,
     requested_amount: float,
     source_identity: str,
+    context_hint: str | None = None,
 ) -> tuple[float, tuple[str, str] | None]:
     amount = _effective_contribution_amount(rpc, currency_name, target_identity, requested_amount)
     current_target = _get_currency_balance_amount(rpc, target_identity, currency_name)
+    logger.info(
+        "currency.contribution.check currency=%s source=%s target=%s requested=%s effective=%s current_target=%s context=%s",
+        currency_name,
+        source_identity,
+        target_identity,
+        requested_amount,
+        amount,
+        current_target,
+        context_hint,
+    )
     if current_target >= amount:
+        logger.info(
+            "currency.contribution.satisfied currency=%s target=%s effective=%s current_target=%s context=%s",
+            currency_name,
+            target_identity,
+            amount,
+            current_target,
+            context_hint,
+        )
         return amount, None
 
     shortfall = amount - current_target
     source_balance = _get_currency_balance_amount(rpc, source_identity, currency_name)
+    logger.info(
+        "currency.contribution.shortfall currency=%s source=%s target=%s shortfall=%s source_balance=%s context=%s",
+        currency_name,
+        source_identity,
+        target_identity,
+        shortfall,
+        source_balance,
+        context_hint,
+    )
     if source_balance < shortfall:
+        exists = _currency_exists(rpc, currency_name)
+        logger.error(
+            "currency.contribution.insufficient currency=%s exists=%s source=%s source_balance=%s shortfall=%s target=%s context=%s",
+            currency_name,
+            exists,
+            source_identity,
+            source_balance,
+            shortfall,
+            target_identity,
+            context_hint,
+        )
         raise Exception(
-            f"Insufficient source balance for {currency_name}: need {shortfall}, have {source_balance} at {source_identity}"
+            f"Insufficient source balance for {currency_name}: need {shortfall}, have {source_balance} at {source_identity}; "
+            f"currency_exists={exists}; target={target_identity}; context={context_hint}"
         )
 
     result = rpc.send_currency_simple_to_identity(source_identity, currency_name, target_identity, shortfall)
+    logger.info(
+        "currency.contribution.transfer_submitted currency=%s source=%s target=%s amount=%s context=%s result=%s",
+        currency_name,
+        source_identity,
+        target_identity,
+        shortfall,
+        context_hint,
+        _log_json(result),
+    )
     return amount, _extract_operation_or_txid(result)
 
 
@@ -346,8 +403,10 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
     step = row["step_index"]
     name = payload["name"]
     parent = payload["parent"]
+    logger.info("currency.simple.step request_id=%s step=%s name=%s parent=%s", row["id"], step, name, parent)
 
     if step == 0:
+        logger.info("currency.simple.rnc.submit request_id=%s name=%s parent=%s", row["id"], name, parent)
         rnc_response = rpc.register_name_commitment(
             name,
             payload["primary_raddress"],
@@ -358,6 +417,7 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
         txid = rnc_response.get("txid") if isinstance(rnc_response, dict) else None
         if not txid:
             raise Exception("Name commitment did not return txid")
+        logger.info("currency.simple.rnc.submitted request_id=%s txid=%s", row["id"], txid)
         progress["rnc_payload"] = rnc_response
         _save_currency_state(
             conn,
@@ -374,6 +434,13 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
         full_name = f"{name}.{parent}"
         identity_payload = _build_identity_payload(full_name, payload["primary_raddress"])
         fee_offer = _resolve_fee_offer(rpc, parent)
+        logger.info(
+            "currency.simple.idr.submit request_id=%s full_name=%s fee_offer=%s source_of_funds=%s",
+            row["id"],
+            full_name,
+            fee_offer,
+            row["source_of_funds"],
+        )
         txid = rpc.register_identity(
             progress.get("rnc_payload", {}),
             identity_payload,
@@ -382,6 +449,7 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
         )
         if not isinstance(txid, str) or not txid:
             raise Exception("register_identity did not return txid")
+        logger.info("currency.simple.idr.submitted request_id=%s txid=%s", row["id"], txid)
         _save_currency_state(
             conn,
             row["id"],
@@ -464,6 +532,15 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
     reserve_identity_exists = bool(reserve.get("identity_exists", False))
     parent = payload["parent"]
     reserve_progress = progress.setdefault("reserves", {}).setdefault(reserve_name, {})
+    logger.info(
+        "currency.fractional.reserve.step request_id=%s reserve=%s index=%s phase=%s identity_exists=%s create_reserves=%s",
+        row["id"],
+        reserve_name,
+        reserve_index,
+        reserve_phase,
+        reserve_identity_exists,
+        bool(payload.get("create_reserves", True)),
+    )
 
     if reserve_phase == 0:
         if reserve_identity_exists:
@@ -471,6 +548,12 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
             _save_currency_state(conn, row["id"], status="in_progress", step_index=3, progress=progress)
             return
 
+        logger.info(
+            "currency.fractional.reserve.rnc.submit request_id=%s reserve=%s parent=%s",
+            row["id"],
+            reserve_name,
+            parent,
+        )
         rnc_response = rpc.register_name_commitment(
             reserve_name,
             payload["primary_raddress"],
@@ -481,6 +564,7 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
         txid = rnc_response.get("txid") if isinstance(rnc_response, dict) else None
         if not txid:
             raise Exception(f"Reserve {reserve_name} name commitment did not return txid")
+        logger.info("currency.fractional.reserve.rnc.submitted request_id=%s reserve=%s txid=%s", row["id"], reserve_name, txid)
         reserve_progress["rnc_payload"] = rnc_response
         progress["reserve_phase"] = 1
         _save_currency_state(
@@ -503,6 +587,14 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
         full_name = f"{reserve_name}.{parent}"
         identity_payload = _build_identity_payload(full_name, payload["primary_raddress"])
         fee_offer = _resolve_fee_offer(rpc, parent)
+        logger.info(
+            "currency.fractional.reserve.idr.submit request_id=%s reserve=%s full_name=%s fee_offer=%s source_of_funds=%s",
+            row["id"],
+            reserve_name,
+            full_name,
+            fee_offer,
+            row["source_of_funds"],
+        )
         txid = rpc.register_identity(
             reserve_progress.get("rnc_payload", {}),
             identity_payload,
@@ -511,6 +603,7 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
         )
         if not isinstance(txid, str) or not txid:
             raise Exception(f"Reserve {reserve_name} register_identity did not return txid")
+        logger.info("currency.fractional.reserve.idr.submitted request_id=%s reserve=%s txid=%s", row["id"], reserve_name, txid)
         progress["reserve_phase"] = 2
         _save_currency_state(
             conn,
@@ -581,6 +674,16 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
     prepare_fractional_identity = bool(payload.get("prepare_fractional_identity", True))
     fractional_identity_exists = bool(payload.get("identity_exists", False))
     create_reserves = bool(payload.get("create_reserves", True))
+    logger.info(
+        "currency.fractional.step request_id=%s step=%s name=%s parent=%s create_reserves=%s prepare_fractional_identity=%s identity_exists=%s",
+        row["id"],
+        step,
+        name,
+        parent,
+        create_reserves,
+        prepare_fractional_identity,
+        fractional_identity_exists,
+    )
 
     if step == 0:
         if not prepare_fractional_identity:
@@ -591,6 +694,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             _save_currency_state(conn, row["id"], status="in_progress", step_index=2, progress=progress)
             return
 
+        logger.info("currency.fractional.rnc.submit request_id=%s name=%s parent=%s", row["id"], name, parent)
         rnc_response = rpc.register_name_commitment(
             name,
             payload["primary_raddress"],
@@ -601,6 +705,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         txid = rnc_response.get("txid") if isinstance(rnc_response, dict) else None
         if not txid:
             raise Exception("Fractional name commitment did not return txid")
+        logger.info("currency.fractional.rnc.submitted request_id=%s txid=%s", row["id"], txid)
         progress["fractional_rnc_payload"] = rnc_response
         _save_currency_state(
             conn,
@@ -621,6 +726,13 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         full_name = f"{name}.{parent}"
         identity_payload = _build_identity_payload(full_name, payload["primary_raddress"])
         fee_offer = _resolve_fee_offer(rpc, parent)
+        logger.info(
+            "currency.fractional.idr.submit request_id=%s full_name=%s fee_offer=%s source_of_funds=%s",
+            row["id"],
+            full_name,
+            fee_offer,
+            row["source_of_funds"],
+        )
         txid = rpc.register_identity(
             progress.get("fractional_rnc_payload", {}),
             identity_payload,
@@ -629,6 +741,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         )
         if not isinstance(txid, str) or not txid:
             raise Exception("Fractional register_identity did not return txid")
+        logger.info("currency.fractional.idr.submitted request_id=%s txid=%s", row["id"], txid)
         _save_currency_state(
             conn,
             row["id"],
@@ -680,6 +793,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 currency_name=native["name"],
                 requested_amount=native["initial_contribution"],
                 source_identity=payload["primary_raddress"],
+                context_hint="native contribution before fractional definecurrency",
             )
             contributions["native"] = native_amount
             progress["effective_initial_contributions"] = contributions
@@ -703,15 +817,41 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         if reserve_pos < len(reserves):
             reserve = reserves[reserve_pos]
             reserve_source_identity = payload["allocation_id"] if create_reserves else payload["primary_raddress"]
+            reserve_name = reserve["name"]
+            reserve_exists = _currency_exists(rpc, reserve_name)
+            logger.info(
+                "currency.fractional.reserve.precheck request_id=%s reserve=%s reserve_exists=%s create_reserves=%s source_identity=%s target_identity=%s requested=%s",
+                row["id"],
+                reserve_name,
+                reserve_exists,
+                create_reserves,
+                reserve_source_identity,
+                target_identity,
+                reserve["initial_contribution"],
+            )
+            if not reserve_exists:
+                mode_hint = "create_reserves=true expected prior reserve definecurrency step" if create_reserves else "create_reserves=false expects reserve currency to already exist"
+                logger.error(
+                    "currency.fractional.reserve.missing request_id=%s reserve=%s mode_hint=%s",
+                    row["id"],
+                    reserve_name,
+                    mode_hint,
+                )
+                raise Exception(f"Reserve currency {reserve_name} not found; {mode_hint}")
             reserve_amount, wait = _ensure_initial_contribution(
                 rpc,
                 target_identity=target_identity,
-                currency_name=reserve["name"],
+                currency_name=reserve_name,
                 requested_amount=reserve["initial_contribution"],
                 source_identity=reserve_source_identity,
+                context_hint=(
+                    "reserve contribution after reserve creation"
+                    if create_reserves
+                    else "reserve contribution with pre-existing reserve currency"
+                ),
             )
             reserve_effective = contributions.setdefault("reserves", {})
-            reserve_effective[reserve["name"]] = reserve_amount
+            reserve_effective[reserve_name] = reserve_amount
             progress["effective_initial_contributions"] = contributions
             if wait is not None:
                 wait_type, wait_value = wait
@@ -794,6 +934,16 @@ def process_currency_once() -> int:
     updated_count = 0
     for row in rows:
         row_status = row["status"]
+        logger.info(
+            "currency.process.row request_id=%s workflow=%s status=%s step=%s wait_type=%s wait_value=%s attempts=%s",
+            row["id"],
+            row["workflow_type"],
+            row_status,
+            row["step_index"],
+            row["wait_type"],
+            row["wait_value"],
+            row["attempts"],
+        )
         try:
             rpc = _get_rpc_connection(row["daemon_name"])
 
@@ -804,6 +954,12 @@ def process_currency_once() -> int:
 
                 tx = rpc.get_raw_transaction(txid)
                 confirmations = tx.get("confirmations", 0) if isinstance(tx, dict) else 0
+                logger.info(
+                    "currency.process.waiting_confirm request_id=%s txid=%s confirmations=%s",
+                    row["id"],
+                    txid,
+                    confirmations,
+                )
                 if confirmations > 0:
                     _save_currency_state(
                         conn,
@@ -823,6 +979,12 @@ def process_currency_once() -> int:
                     raise Exception("Missing operation id while in waiting_opid state")
 
                 txid = _poll_operation_for_txid(rpc, opid)
+                logger.info(
+                    "currency.process.waiting_opid request_id=%s opid=%s resolved_txid=%s",
+                    row["id"],
+                    opid,
+                    txid,
+                )
                 if txid:
                     _save_currency_state(
                         conn,
@@ -860,6 +1022,13 @@ def process_currency_once() -> int:
             else:
                 raise Exception(f"Unsupported workflow type: {workflow_type}")
         except Exception as exc:
+            logger.exception(
+                "currency.process.error request_id=%s workflow=%s status=%s step=%s",
+                row["id"],
+                row["workflow_type"],
+                row_status,
+                row["step_index"],
+            )
             _record_currency_retry_or_failure(
                 conn,
                 row["id"],

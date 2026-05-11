@@ -38,6 +38,15 @@ def _amount_epsilon() -> float:
     return 1e-8 if value <= 0 else value
 
 
+def _conversion_pc_fee() -> float:
+    raw = os.getenv("CURRENCY_CONVERSION_PC_FEE", "0.00025")
+    try:
+        value = float(raw)
+    except Exception:
+        return 0.00025
+    return 0.00025 if value < 0 else value
+
+
 def _normalize_amount(value: float) -> float:
     decimals = _amount_decimals()
     quant = Decimal("1").scaleb(-decimals)
@@ -231,11 +240,12 @@ def _is_hodling_supply(rpc: Any, currency_name_or_id: str, identity_name_or_id: 
     return abs(balance - supply_f) < 1e-12
 
 
-def _effective_contribution_amount(rpc: Any, currency_name: str, identity_name_or_id: str, requested_amount: float) -> float:
-    conversion_fee = float(os.getenv("CURRENCY_CONVERSION_PC_FEE", "0.00025"))
-    if _is_hodling_supply(rpc, currency_name, identity_name_or_id):
-        return _normalize_amount(requested_amount * (1 - conversion_fee))
-    return _normalize_amount(requested_amount)
+def _effective_contribution_amount(requested_amount: float, apply_conversion_fee: bool) -> float:
+    if not apply_conversion_fee:
+        return _normalize_amount(requested_amount)
+
+    conversion_fee = _conversion_pc_fee()
+    return _normalize_amount(requested_amount * (1 - conversion_fee))
 
 
 def _ensure_initial_contribution(
@@ -247,9 +257,10 @@ def _ensure_initial_contribution(
     source_identity: str,
     context_hint: str | None = None,
     wait_for_confirmation: bool = True,
+    apply_conversion_fee: bool = False,
 ) -> tuple[float, tuple[str, str] | None]:
     epsilon = _amount_epsilon()
-    amount = _effective_contribution_amount(rpc, currency_name, target_identity, requested_amount)
+    amount = _effective_contribution_amount(requested_amount, apply_conversion_fee)
     current_target = _get_currency_balance_amount(rpc, target_identity, currency_name)
     logger.info(
         "currency.contribution.check currency=%s source=%s target=%s requested=%s effective=%s current_target=%s context=%s",
@@ -886,6 +897,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                     source_identity=payload["primary_raddress"],
                     context_hint="fractional identity definecurrency funding",
                     wait_for_confirmation=True,
+                    apply_conversion_fee=False,
                 )
                 progress["define_funding_checked"] = True
                 _record_pending_wait(wait)
@@ -900,6 +912,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                     source_identity=payload["primary_raddress"],
                     context_hint="native contribution before fractional definecurrency",
                     wait_for_confirmation=True,
+                    apply_conversion_fee=True,
                 )
                 contributions["native"] = native_amount
                 progress["effective_initial_contributions"] = contributions
@@ -944,6 +957,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                         else "reserve contribution with pre-existing reserve currency"
                     ),
                     wait_for_confirmation=True,
+                    apply_conversion_fee=True,
                 )
                 reserve_effective = contributions.setdefault("reserves", {})
                 reserve_effective[reserve_name] = reserve_amount

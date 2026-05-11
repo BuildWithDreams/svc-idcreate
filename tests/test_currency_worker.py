@@ -2,6 +2,8 @@ import pathlib
 import sqlite3
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
@@ -229,6 +231,7 @@ class _FakeFractionalDustShortfallRpc:
 class _FakeFractionalContributionSweepRpc:
     def __init__(self):
         self.sent_calls = []
+        self.last_define_options = None
         self.balances = {
             "RtestAddress": {
                 "VRSCTEST": 1000.0,
@@ -257,6 +260,7 @@ class _FakeFractionalContributionSweepRpc:
         return "c" * 64
 
     def define_currency(self, options):
+        self.last_define_options = dict(options)
         return "d" * 64
 
 
@@ -856,3 +860,67 @@ def test_worker_fractional_define_fee_topup_targets_identity(monkeypatch, tmp_pa
         if call[1] == "VRSCTEST" and call[0] == "RtestAddress" and call[2] == "DPNK@" and call[3] >= 200.001
     ]
     assert fee_topups
+
+
+def test_worker_fractional_define_initial_contributions_apply_conversion_fee(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setenv("CURRENCY_CONVERSION_PC_FEE", "0.00025")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {
+                        "name": "VRSCTEST",
+                        "weight": 0.55,
+                        "initial_contribution": 20,
+                    },
+                    "reserves": [{"name": "SPORTS", "weight": 0.2, "initial_contribution": 0.1}],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "prepare_fractional_identity": False,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+    request_id = resp.json()["request_id"]
+
+    fake_rpc = _FakeFractionalContributionSweepRpc()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    for _ in range(20):
+        worker.process_once()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT status, step_index FROM currency_requests WHERE id = ?", (request_id,)).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "complete"
+    assert row["step_index"] == 6
+    assert fake_rpc.last_define_options is not None
+
+    expected_native = 20 * (1 - 0.00025)
+    expected_reserve = 0.1 * (1 - 0.00025)
+    initial_contributions = fake_rpc.last_define_options["initialcontributions"]
+
+    assert initial_contributions[0] == pytest.approx(expected_native, rel=0, abs=1e-8)
+    assert initial_contributions[1] == pytest.approx(expected_reserve, rel=0, abs=1e-8)

@@ -17,6 +17,9 @@ import math
 import hashlib
 import re
 from SFConstants import DAEMON_CONFIGS, DAEMON_VERUSD_VRSC, VTRC_NATIVE_COINS
+import currency_functions
+import shared_functions
+import services
 
 # Provisioning endpoints
 from provisioning.router import router as provisioning_router
@@ -31,28 +34,15 @@ logger = logging.getLogger(__name__)
 
 
 def _log_json(data) -> str:
-    try:
-        return json.dumps(data, sort_keys=True, default=str)
-    except Exception:
-        return str(data)
+    return shared_functions.log_json(data)
 
 
 def _redact_fields(data: dict, redacted_keys: set[str] | None = None) -> dict:
-    redacted = dict(data)
-    if not redacted_keys:
-        return redacted
-    for key in redacted_keys:
-        if key in redacted and redacted[key] is not None:
-            redacted[key] = "***REDACTED***"
-    return redacted
+    return shared_functions.redact_fields(data, redacted_keys)
 
 
 def _mask_value(value: str) -> str:
-    if not value:
-        return ""
-    if len(value) <= 10:
-        return "***MASKED***"
-    return f"{value[:6]}...{value[-4:]}"
+    return shared_functions.mask_value(value)
 
 
 class RegisterRequest(BaseModel):
@@ -610,15 +600,11 @@ app.include_router(provisioning_router)
 
 
 def _valid_api_keys() -> set[str]:
-    raw_keys = os.getenv("REGISTRAR_API_KEYS", "")
-    return {k.strip() for k in raw_keys.split(",") if k.strip()}
+    return shared_functions.valid_api_keys()
 
 
 def _require_api_key(api_key: str | None = Security(api_key_header)) -> str:
-    valid_keys = _valid_api_keys()
-    if not valid_keys or api_key not in valid_keys:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
-    return api_key
+    return shared_functions.require_api_key(api_key)
 
 
 def _get_rpc_connection(daemon_name: str):
@@ -628,32 +614,15 @@ def _get_rpc_connection(daemon_name: str):
 
 
 def _resolve_daemon_by_native_coin(native_coin: str) -> str | None:
-    requested_ticker = native_coin.strip().upper()
-    for daemon_name, ticker in VTRC_NATIVE_COINS.items():
-        if ticker.upper() == requested_ticker and daemon_name in DAEMON_CONFIGS:
-            return daemon_name
-    return None
+    return shared_functions.resolve_daemon_by_native_coin(native_coin)
 
 
 def _normalize_parent_namespace(value: str) -> str:
-    return value.strip().lower()
+    return shared_functions.normalize_parent_namespace(value)
 
 
 def _allowed_parent_namespaces() -> set[str]:
-    configured: set[str] = set()
-
-    # Backward-compatible single preset parent.
-    for env_name in ("REGISTRAR_ALLOWED_PARENT", "PARENT"):
-        value = os.getenv(env_name, "").strip()
-        if value:
-            configured.add(_normalize_parent_namespace(value))
-
-    # Preferred comma-separated allowlist.
-    raw_list = os.getenv("REGISTRAR_ALLOWED_PARENTS", "").strip()
-    if raw_list:
-        configured.update(_normalize_parent_namespace(item) for item in raw_list.split(",") if item.strip())
-
-    return configured
+    return shared_functions.allowed_parent_namespaces()
 
 
 def _store_webhook_event(event_name: str | None, signature: str | None, payload: dict | list | str) -> None:
@@ -820,196 +789,7 @@ def health_check(
 
 @app.post("/api/register", status_code=202, summary="Start asynchronous ID registration")
 def register_identity(request: RegisterRequest, api_key: str = Security(_require_api_key)):
-    """
-    Register name commitment and persist request state for async completion.
-
-    The endpoint returns immediately with a request id after broadcasting the
-    name commitment transaction and storing the request in SQLite.
-    """
-    logger.info(
-        "api.register.start payload=%s",
-        _log_json(
-            _redact_fields(
-                request.model_dump(),
-                redacted_keys={"webhook_secret"},
-            )
-        ),
-    )
-
-    daemon_name = _resolve_daemon_by_native_coin(request.native_coin)
-    if daemon_name is None:
-        logger.warning(
-            "api.register.daemon_unresolved native_coin=%s name=%s parent=%s",
-            request.native_coin,
-            request.name,
-            request.parent,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "status": "degraded",
-                "native_coin": request.native_coin,
-                "error": "No enabled daemon configured for requested native coin.",
-            },
-        )
-
-    logger.info(
-        "api.register.daemon_resolved native_coin=%s daemon=%s",
-        request.native_coin,
-        daemon_name,
-    )
-
-    source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
-    if not source_of_funds:
-        logger.error("api.register.source_of_funds_missing daemon=%s", daemon_name)
-        raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
-
-    logger.debug(
-        "api.register.source_of_funds_resolved daemon=%s source_of_funds=%s",
-        daemon_name,
-        _mask_value(source_of_funds),
-    )
-
-    allowed_parents = _allowed_parent_namespaces()
-    parent_normalized = _normalize_parent_namespace(request.parent)
-    logger.debug(
-        "api.register.parent_validation requested_parent=%s normalized_parent=%s allowed_parents=%s",
-        request.parent,
-        parent_normalized,
-        _log_json(sorted(allowed_parents)),
-    )
-
-    if allowed_parents and parent_normalized not in allowed_parents:
-        logger.warning(
-            "api.register.parent_denied requested_parent=%s allowed_parents=%s",
-            request.parent,
-            _log_json(sorted(allowed_parents)),
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "Requested parent namespace is not permitted.",
-                "requested_parent": request.parent,
-                "allowed_parents": sorted(allowed_parents),
-            },
-        )
-
-    try:
-        logger.debug(
-            "api.register.rpc_name_commitment.request daemon=%s request=%s",
-            daemon_name,
-            _log_json(
-                {
-                    "name": request.name,
-                    "control_address": source_of_funds,
-                    "parent": request.parent,
-                    "source_of_funds": _mask_value(source_of_funds),
-                }
-            ),
-        )
-        rpc_connection = _get_rpc_connection(daemon_name)
-        rnc_response = rpc_connection.register_name_commitment(
-            request.name,
-            source_of_funds,
-            "",
-            request.parent,
-            source_of_funds,
-        )
-        logger.info(
-            "api.register.rpc_name_commitment.success daemon=%s txid=%s",
-            daemon_name,
-            rnc_response.get("txid") if isinstance(rnc_response, dict) else None,
-        )
-        logger.debug(
-            "api.register.rpc_name_commitment.response daemon=%s response=%s",
-            daemon_name,
-            _log_json(rnc_response),
-        )
-    except Exception as e:
-        logger.exception(
-            "api.register.rpc_name_commitment.error daemon=%s name=%s parent=%s",
-            daemon_name,
-            request.name,
-            request.parent,
-        )
-        raise HTTPException(status_code=503, detail=f"RPC error during name commitment: {e}")
-
-    request_id = str(uuid.uuid4())
-    logger.debug(
-        "api.register.db_insert.prepared request_id=%s values=%s",
-        request_id,
-        _log_json(
-            {
-                "id": request_id,
-                "requested_name": request.name,
-                "parent_namespace": request.parent,
-                "native_coin": request.native_coin,
-                "daemon_name": daemon_name,
-                "primary_raddress": request.primary_raddress,
-                "control_address": source_of_funds,
-                "source_of_funds": _mask_value(source_of_funds),
-                "status": "pending_rnc_confirm",
-                "rnc_txid": rnc_response.get("txid") if isinstance(rnc_response, dict) else None,
-                "has_webhook_url": bool(request.webhook_url),
-                "has_webhook_secret": bool(request.webhook_secret),
-            }
-        ),
-    )
-
-    conn = _get_db_connection()
-    conn.execute(
-        """
-        INSERT INTO registrations (
-            id,
-            requested_name,
-            parent_namespace,
-            native_coin,
-            daemon_name,
-            primary_raddress,
-            control_address,
-            source_of_funds,
-            status,
-            rnc_txid,
-            rnc_payload_json,
-            webhook_url,
-            webhook_secret
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            request_id,
-            request.name,
-            request.parent,
-            request.native_coin,
-            daemon_name,
-            request.primary_raddress,
-            source_of_funds,
-            source_of_funds,
-            "pending_rnc_confirm",
-            rnc_response.get("txid"),
-            json.dumps(rnc_response),
-            request.webhook_url,
-            request.webhook_secret,
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-    logger.info(
-        "api.register.success request_id=%s status=%s daemon=%s native_coin=%s txid_rnc=%s",
-        request_id,
-        "pending_rnc_confirm",
-        daemon_name,
-        request.native_coin,
-        rnc_response.get("txid") if isinstance(rnc_response, dict) else None,
-    )
-
-    return {
-        "request_id": request_id,
-        "status": "pending_rnc_confirm",
-        "daemon": daemon_name,
-        "native_coin": request.native_coin,
-        "txid_rnc": rnc_response.get("txid"),
-    }
+    return services.register_identity(request)
 
 
 @app.get("/api/status/{request_id}", summary="Get registration request status")
@@ -1122,27 +902,11 @@ def list_recent_failures(
 
 
 def _build_currency_request_response(request_id: str, status: str, workflow_type: str, daemon_name: str, native_coin: str):
-    return {
-        "request_id": request_id,
-        "status": status,
-        "workflow_type": workflow_type,
-        "daemon": daemon_name,
-        "native_coin": native_coin,
-    }
+    return currency_functions.build_currency_request_response(request_id, status, workflow_type, daemon_name, native_coin)
 
 
 def _validate_currency_parent_or_403(parent: str):
-    allowed_parents = _allowed_parent_namespaces()
-    parent_normalized = _normalize_parent_namespace(parent)
-    if allowed_parents and parent_normalized not in allowed_parents:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "Requested parent namespace is not permitted.",
-                "requested_parent": parent,
-                "allowed_parents": sorted(allowed_parents),
-            },
-        )
+    shared_functions.validate_currency_parent_or_403(parent)
 
 
 def _resolve_currency_daemon_or_503(native_coin: str) -> str:
@@ -1169,36 +933,16 @@ def _enqueue_simple_currency_request(
     source_of_funds: str,
     plan: CurrencySimplePlan,
 ) -> dict:
-    request_id = str(uuid.uuid4())
-    payload = {
-        "name": name,
-        "parent": parent,
-        "native_coin": native_coin,
-        "primary_raddress": primary_raddress,
-        "pre_allocation_id": plan.pre_allocation_id,
-        "pre_allocation_amount": plan.pre_allocation_amount,
-        "id_registration_fees": plan.id_registration_fees,
-        "proof_protocol": plan.proof_protocol,
-        "define_options": plan.define_options,
-        "define_funding_amount": plan.define_funding_amount,
-    }
-    _create_currency_request_record(
-        {
-            "id": request_id,
-            "workflow_type": "simple_token",
-            "requested_name": name,
-            "parent_namespace": parent,
-            "native_coin": native_coin,
-            "daemon_name": daemon_name,
-            "primary_raddress": primary_raddress,
-            "source_of_funds": source_of_funds,
-            "status": "pending",
-            "payload_json": json.dumps(payload),
-            "progress_json": json.dumps({}),
-        }
+    return currency_functions.enqueue_simple_currency_request(
+        name=name,
+        parent=parent,
+        native_coin=native_coin,
+        primary_raddress=primary_raddress,
+        daemon_name=daemon_name,
+        source_of_funds=source_of_funds,
+        plan=plan,
+        create_currency_request_record=_create_currency_request_record,
     )
-
-    return _build_currency_request_response(request_id, "pending", "simple_token", daemon_name, native_coin)
 
 
 def _enqueue_fractional_currency_request(
@@ -1211,220 +955,35 @@ def _enqueue_fractional_currency_request(
     source_of_funds: str,
     plan: CurrencyFractionalPlan,
 ) -> dict:
-    request_id = str(uuid.uuid4())
-    payload = {
-        "name": name,
-        "parent": parent,
-        "native_coin": native_coin,
-        "primary_raddress": primary_raddress,
-        "initial_supply": plan.initial_supply,
-        "id_registration_fees": plan.id_registration_fees,
-        "id_referral_levels": plan.id_referral_levels,
-        "start_block": plan.start_block,
-        "native": plan.native.model_dump(),
-        "reserves": [reserve.model_dump() for reserve in plan.reserves],
-        "allocation_id": plan.allocation_id,
-        "define_funding_amount": plan.define_funding_amount,
-        "create_reserves": plan.create_reserves,
-        "prepare_fractional_identity": plan.prepare_fractional_identity,
-        "identity_exists": plan.identity_exists,
-    }
-
-    _create_currency_request_record(
-        {
-            "id": request_id,
-            "workflow_type": "fractional_token",
-            "requested_name": name,
-            "parent_namespace": parent,
-            "native_coin": native_coin,
-            "daemon_name": daemon_name,
-            "primary_raddress": primary_raddress,
-            "source_of_funds": source_of_funds,
-            "status": "pending",
-            "payload_json": json.dumps(payload),
-            "progress_json": json.dumps({"reserve_index": 0, "reserve_phase": 0, "fund_index": 0}),
-        }
+    return currency_functions.enqueue_fractional_currency_request(
+        name=name,
+        parent=parent,
+        native_coin=native_coin,
+        primary_raddress=primary_raddress,
+        daemon_name=daemon_name,
+        source_of_funds=source_of_funds,
+        plan=plan,
+        create_currency_request_record=_create_currency_request_record,
     )
-
-    return _build_currency_request_response(request_id, "pending", "fractional_token", daemon_name, native_coin)
 
 
 def _currency_plan_template(mode: str = "auto") -> dict:
-    simple_template = {
-        "pre_allocation_id": "blockoneminer@",
-        "pre_allocation_amount": 80000,
-        "id_registration_fees": 25,
-        "proof_protocol": 1,
-        "define_options": 32,
-        "define_funding_amount": 200.001,
-    }
-
-    fractional_template = {
-        "initial_supply": 100000,
-        "id_registration_fees": 50,
-        "id_referral_levels": 0,
-        "start_block": 28000,
-        "native": {
-            "name": "VRSCTEST",
-            "weight": 0.5,
-            "initial_contribution": 20,
-        },
-        "reserves": [
-            {
-                "name": "TENNIS",
-                "supply": 80000,
-                "identity_exists": False,
-                "weight": 0.25,
-                "initial_contribution": 40000,
-            },
-            {
-                "name": "SAILING",
-                "supply": 80000,
-                "identity_exists": False,
-                "weight": 0.25,
-                "initial_contribution": 40000,
-            },
-        ],
-        "allocation_id": "blockoneminer@",
-        "define_funding_amount": 200.001,
-        "create_reserves": True,
-        "prepare_fractional_identity": True,
-        "identity_exists": False,
-    }
-
-    template = {
-        "name": "SIXTH",
-        "parent": "bitcoins.vrsc",
-        "native_coin": "VRSC",
-        "primary_raddress": "R...",
-        "mode": mode,
-    }
-
-    normalized_mode = mode.strip().lower()
-    if normalized_mode in {"simple", "simple_token"}:
-        template["mode"] = "simple_token"
-        template["simple"] = simple_template
-    elif normalized_mode in {"fractional", "fractional_token"}:
-        template["mode"] = "fractional_token"
-        template["fractional"] = fractional_template
-    else:
-        template["mode"] = "auto"
-        template["simple"] = simple_template
-        template["fractional"] = fractional_template
-
-    return template
+    return currency_functions.currency_plan_template(mode)
 
 
 @app.post("/api/currency/simple", status_code=202, summary="Start asynchronous simple token currency creation")
 def create_simple_currency(request: CreateSimpleCurrencyRequest, api_key: str = Security(_require_api_key)):
-    daemon_name = _resolve_currency_daemon_or_503(request.native_coin)
-    _validate_currency_parent_or_403(request.parent)
-
-    source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
-    if not source_of_funds:
-        raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
-
-    simple_plan = CurrencySimplePlan(
-        pre_allocation_id=request.pre_allocation_id,
-        pre_allocation_amount=request.pre_allocation_amount,
-        id_registration_fees=request.id_registration_fees,
-        proof_protocol=request.proof_protocol,
-        define_options=request.define_options,
-        define_funding_amount=request.define_funding_amount,
-    )
-    return _enqueue_simple_currency_request(
-        name=request.name,
-        parent=request.parent,
-        native_coin=request.native_coin,
-        primary_raddress=request.primary_raddress,
-        daemon_name=daemon_name,
-        source_of_funds=source_of_funds,
-        plan=simple_plan,
-    )
+    return services.create_simple_currency(request)
 
 
 @app.post("/api/currency/fractional", status_code=202, summary="Start asynchronous fractional reserve currency creation")
 def create_fractional_currency(request: CreateFractionalCurrencyRequest, api_key: str = Security(_require_api_key)):
-    daemon_name = _resolve_currency_daemon_or_503(request.native_coin)
-    _validate_currency_parent_or_403(request.parent)
-
-    source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
-    if not source_of_funds:
-        raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
-
-    fractional_plan = CurrencyFractionalPlan(
-        initial_supply=request.initial_supply,
-        id_registration_fees=request.id_registration_fees,
-        id_referral_levels=request.id_referral_levels,
-        start_block=request.start_block,
-        native=request.native,
-        reserves=request.reserves,
-        allocation_id=request.allocation_id,
-        define_funding_amount=request.define_funding_amount,
-        create_reserves=request.create_reserves,
-        prepare_fractional_identity=request.prepare_fractional_identity,
-        identity_exists=request.identity_exists,
-    )
-    return _enqueue_fractional_currency_request(
-        name=request.name,
-        parent=request.parent,
-        native_coin=request.native_coin,
-        primary_raddress=request.primary_raddress,
-        daemon_name=daemon_name,
-        source_of_funds=source_of_funds,
-        plan=fractional_plan,
-    )
+    return services.create_fractional_currency(request)
 
 
 @app.post("/api/currency/plan", status_code=202, summary="Start asynchronous currency creation from a unified plan object")
 def create_currency_from_plan(request: CreateCurrencyPlanRequest, api_key: str = Security(_require_api_key)):
-    daemon_name = _resolve_currency_daemon_or_503(request.native_coin)
-    _validate_currency_parent_or_403(request.parent)
-
-    source_of_funds = os.getenv("SOURCE_OF_FUNDS", "").strip()
-    if not source_of_funds:
-        raise HTTPException(status_code=503, detail="SOURCE_OF_FUNDS is not configured")
-
-    mode = (request.mode or "auto").strip().lower()
-    if mode in {"auto", ""}:
-        if request.fractional is not None:
-            mode = "fractional_token"
-        elif request.simple is not None:
-            mode = "simple_token"
-        else:
-            raise HTTPException(status_code=400, detail="Plan mode auto requires either 'simple' or 'fractional' section")
-    elif mode == "simple":
-        mode = "simple_token"
-    elif mode == "fractional":
-        mode = "fractional_token"
-
-    if mode == "simple_token":
-        if request.simple is None:
-            raise HTTPException(status_code=400, detail="mode simple_token requires 'simple' section")
-        return _enqueue_simple_currency_request(
-            name=request.name,
-            parent=request.parent,
-            native_coin=request.native_coin,
-            primary_raddress=request.primary_raddress,
-            daemon_name=daemon_name,
-            source_of_funds=source_of_funds,
-            plan=request.simple,
-        )
-
-    if mode == "fractional_token":
-        if request.fractional is None:
-            raise HTTPException(status_code=400, detail="mode fractional_token requires 'fractional' section")
-        return _enqueue_fractional_currency_request(
-            name=request.name,
-            parent=request.parent,
-            native_coin=request.native_coin,
-            primary_raddress=request.primary_raddress,
-            daemon_name=daemon_name,
-            source_of_funds=source_of_funds,
-            plan=request.fractional,
-        )
-
-    raise HTTPException(status_code=400, detail="mode must be one of: auto, simple, simple_token, fractional, fractional_token")
+    return services.create_currency_from_plan(request)
 
 
 @app.get("/api/currency/plan/template", summary="Get a reference currency plan template payload")

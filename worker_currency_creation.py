@@ -236,6 +236,7 @@ def _ensure_initial_contribution(
     requested_amount: float,
     source_identity: str,
     context_hint: str | None = None,
+    wait_for_confirmation: bool = True,
 ) -> tuple[float, tuple[str, str] | None]:
     epsilon = _amount_epsilon()
     amount = _effective_contribution_amount(rpc, currency_name, target_identity, requested_amount)
@@ -303,6 +304,7 @@ def _ensure_initial_contribution(
         return amount, None
 
     result = rpc.send_currency_simple_to_identity(source_identity, currency_name, target_identity, shortfall)
+    wait = _extract_operation_or_txid(result)
     logger.info(
         "currency.contribution.transfer_submitted currency=%s source=%s target=%s amount=%s context=%s result=%s",
         currency_name,
@@ -312,7 +314,9 @@ def _ensure_initial_contribution(
         context_hint,
         json.dumps(result, sort_keys=True, default=str),
     )
-    return amount, _extract_operation_or_txid(result)
+    if not wait_for_confirmation:
+        return amount, None
+    return amount, wait
 
 
 def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, payload: dict, progress: dict, rpc: Any):
@@ -699,108 +703,166 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         contributions = progress.setdefault("effective_initial_contributions", {})
         native = payload["native"]
         reserves = payload.get("reserves", [])
-        fund_index = int(progress.get("fund_index", 0))
         target_identity = f"{name}@"
 
-        if fund_index == 0:
-            native_amount, wait = _ensure_initial_contribution(
-                rpc,
-                target_identity=target_identity,
-                currency_name=native["name"],
-                requested_amount=native["initial_contribution"],
-                source_identity=payload["primary_raddress"],
-                context_hint="native contribution before fractional definecurrency",
-            )
-            contributions["native"] = native_amount
-            progress["effective_initial_contributions"] = contributions
-            if wait is not None:
-                wait_type, wait_value = wait
-                _save_currency_state(
-                    conn,
-                    row["id"],
-                    status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
-                    step_index=4,
-                    progress=progress,
-                    wait_type=wait_type,
-                    wait_value=wait_value,
-                )
-                return
-            progress["fund_index"] = 1
-            _save_currency_state(conn, row["id"], status="in_progress", step_index=4, progress=progress)
-            return
+        # Submit all needed top-ups in one sweep (no per-transfer confirmation wait).
+        while True:
+            fund_index = int(progress.get("fund_index", 0))
 
-        reserve_pos = fund_index - 1
-        if reserve_pos < len(reserves):
-            reserve = reserves[reserve_pos]
-            reserve_source_identity = payload["allocation_id"] if create_reserves else payload["primary_raddress"]
-            reserve_name = reserve["name"]
-            reserve_exists = _currency_exists(rpc, reserve_name)
-            logger.info(
-                "currency.fractional.reserve.precheck request_id=%s reserve=%s reserve_exists=%s create_reserves=%s source_identity=%s target_identity=%s requested=%s",
-                row["id"],
-                reserve_name,
-                reserve_exists,
-                create_reserves,
-                reserve_source_identity,
-                target_identity,
-                reserve["initial_contribution"],
-            )
-            if not reserve_exists:
-                mode_hint = "create_reserves=true expected prior reserve definecurrency step" if create_reserves else "create_reserves=false expects reserve currency to already exist"
-                logger.error(
-                    "currency.fractional.reserve.missing request_id=%s reserve=%s mode_hint=%s",
+            if not bool(progress.get("define_funding_checked", False)):
+                _, wait = _ensure_initial_contribution(
+                    rpc,
+                    target_identity=target_identity,
+                    currency_name=native["name"],
+                    requested_amount=float(payload["define_funding_amount"]),
+                    source_identity=payload["primary_raddress"],
+                    context_hint="fractional identity definecurrency funding",
+                    wait_for_confirmation=False,
+                )
+                progress["define_funding_checked"] = True
+                if wait is not None:
+                    wait_type, wait_value = wait
+                    _save_currency_state(
+                        conn,
+                        row["id"],
+                        status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
+                        step_index=4,
+                        progress=progress,
+                        wait_type=wait_type,
+                        wait_value=wait_value,
+                    )
+                    return
+                continue
+
+            if fund_index == 0:
+                native_amount, wait = _ensure_initial_contribution(
+                    rpc,
+                    target_identity=target_identity,
+                    currency_name=native["name"],
+                    requested_amount=native["initial_contribution"],
+                    source_identity=payload["primary_raddress"],
+                    context_hint="native contribution before fractional definecurrency",
+                    wait_for_confirmation=False,
+                )
+                contributions["native"] = native_amount
+                progress["effective_initial_contributions"] = contributions
+                if wait is not None:
+                    wait_type, wait_value = wait
+                    _save_currency_state(
+                        conn,
+                        row["id"],
+                        status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
+                        step_index=4,
+                        progress=progress,
+                        wait_type=wait_type,
+                        wait_value=wait_value,
+                    )
+                    return
+                progress["fund_index"] = 1
+                continue
+
+            reserve_pos = fund_index - 1
+            if reserve_pos < len(reserves):
+                reserve = reserves[reserve_pos]
+                reserve_source_identity = payload["allocation_id"] if create_reserves else payload["primary_raddress"]
+                reserve_name = reserve["name"]
+                reserve_exists = _currency_exists(rpc, reserve_name)
+                logger.info(
+                    "currency.fractional.reserve.precheck request_id=%s reserve=%s reserve_exists=%s create_reserves=%s source_identity=%s target_identity=%s requested=%s",
                     row["id"],
                     reserve_name,
-                    mode_hint,
+                    reserve_exists,
+                    create_reserves,
+                    reserve_source_identity,
+                    target_identity,
+                    reserve["initial_contribution"],
                 )
-                raise Exception(f"Reserve currency {reserve_name} not found; {mode_hint}")
-            reserve_amount, wait = _ensure_initial_contribution(
-                rpc,
-                target_identity=target_identity,
-                currency_name=reserve_name,
-                requested_amount=reserve["initial_contribution"],
-                source_identity=reserve_source_identity,
-                context_hint=(
-                    "reserve contribution after reserve creation"
-                    if create_reserves
-                    else "reserve contribution with pre-existing reserve currency"
-                ),
-            )
-            reserve_effective = contributions.setdefault("reserves", {})
-            reserve_effective[reserve_name] = reserve_amount
-            progress["effective_initial_contributions"] = contributions
-            if wait is not None:
-                wait_type, wait_value = wait
-                _save_currency_state(
-                    conn,
-                    row["id"],
-                    status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
-                    step_index=4,
-                    progress=progress,
-                    wait_type=wait_type,
-                    wait_value=wait_value,
+                if not reserve_exists:
+                    mode_hint = "create_reserves=true expected prior reserve definecurrency step" if create_reserves else "create_reserves=false expects reserve currency to already exist"
+                    logger.error(
+                        "currency.fractional.reserve.missing request_id=%s reserve=%s mode_hint=%s",
+                        row["id"],
+                        reserve_name,
+                        mode_hint,
+                    )
+                    raise Exception(f"Reserve currency {reserve_name} not found; {mode_hint}")
+                reserve_amount, wait = _ensure_initial_contribution(
+                    rpc,
+                    target_identity=target_identity,
+                    currency_name=reserve_name,
+                    requested_amount=reserve["initial_contribution"],
+                    source_identity=reserve_source_identity,
+                    context_hint=(
+                        "reserve contribution after reserve creation"
+                        if create_reserves
+                        else "reserve contribution with pre-existing reserve currency"
+                    ),
+                    wait_for_confirmation=False,
                 )
-                return
-            progress["fund_index"] = fund_index + 1
-            _save_currency_state(conn, row["id"], status="in_progress", step_index=4, progress=progress)
-            return
+                reserve_effective = contributions.setdefault("reserves", {})
+                reserve_effective[reserve_name] = reserve_amount
+                progress["effective_initial_contributions"] = contributions
+                if wait is not None:
+                    wait_type, wait_value = wait
+                    _save_currency_state(
+                        conn,
+                        row["id"],
+                        status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
+                        step_index=4,
+                        progress=progress,
+                        wait_type=wait_type,
+                        wait_value=wait_value,
+                    )
+                    return
+                progress["fund_index"] = fund_index + 1
+                continue
 
-        _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
-        return
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
+            return
 
     if step == 5:
         native = payload["native"]
         reserves = payload.get("reserves", [])
         effective = progress.get("effective_initial_contributions", {})
         reserve_effective = effective.get("reserves", {}) if isinstance(effective.get("reserves"), dict) else {}
-        initial_contributions = [effective.get("native", native["initial_contribution"])]
+        epsilon = _amount_epsilon()
+        native_effective = effective.get("native", native["initial_contribution"])
+        initial_contributions = [native_effective]
+
+        # Ensure funding is actually visible on-chain before definecurrency.
+        required_native_balance = _normalize_amount(max(float(payload["define_funding_amount"]), float(native_effective)))
+        current_native_balance = _get_currency_balance_amount(rpc, f"{name}@", native["name"])
+        if current_native_balance + epsilon < required_native_balance:
+            logger.info(
+                "currency.fractional.define.wait_native_funding request_id=%s identity=%s currency=%s required=%s current=%s",
+                row["id"],
+                f"{name}@",
+                native["name"],
+                required_native_balance,
+                current_native_balance,
+            )
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
+            return
 
         currencies = [native["name"]]
         weights = [native["weight"]]
         for reserve in reserves:
             currencies.append(reserve["name"])
             weights.append(reserve["weight"])
-            initial_contributions.append(reserve_effective.get(reserve["name"], reserve["initial_contribution"]))
+            reserve_required = float(reserve_effective.get(reserve["name"], reserve["initial_contribution"]))
+            current_reserve_balance = _get_currency_balance_amount(rpc, f"{name}@", reserve["name"])
+            if current_reserve_balance + epsilon < reserve_required:
+                logger.info(
+                    "currency.fractional.define.wait_reserve_funding request_id=%s identity=%s reserve=%s required=%s current=%s",
+                    row["id"],
+                    f"{name}@",
+                    reserve["name"],
+                    reserve_required,
+                    current_reserve_balance,
+                )
+                _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
+                return
+            initial_contributions.append(reserve_required)
 
         options = {
             "name": name,

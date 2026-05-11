@@ -226,6 +226,40 @@ class _FakeFractionalDustShortfallRpc:
         return "d" * 64
 
 
+class _FakeFractionalContributionSweepRpc:
+    def __init__(self):
+        self.sent_calls = []
+        self.balances = {
+            "RtestAddress": {
+                "VRSCTEST": 1000.0,
+                "SPORTS": 10.0,
+                "SAILING": 10.0,
+                "YEN": 10.0,
+            },
+            "DPNK@": {},
+        }
+
+    def get_raw_transaction(self, txid, verbose=1):
+        return {"txid": txid, "confirmations": 1}
+
+    def get_currency(self, currency_name_or_id):
+        return {"idregistrationfees": 25}
+
+    def get_currency_balance(self, holder):
+        return dict(self.balances.get(holder, {}))
+
+    def send_currency_simple_to_identity(self, from_address, currency, identity, amount):
+        self.sent_calls.append((from_address, currency, identity, amount))
+        source_balances = self.balances.setdefault(from_address, {})
+        source_balances[currency] = float(source_balances.get(currency, 0.0)) - float(amount)
+        target_balances = self.balances.setdefault(identity, {})
+        target_balances[currency] = float(target_balances.get(currency, 0.0)) + float(amount)
+        return "c" * 64
+
+    def define_currency(self, options):
+        return "d" * 64
+
+
 def test_worker_advances_simple_currency_to_complete(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
@@ -532,4 +566,125 @@ def test_worker_fractional_native_dust_shortfall_does_not_submit_send(monkeypatc
     assert row is not None
     assert row["status"] == "complete"
     assert row["step_index"] == 6
-    assert fake_rpc.sent_calls == []
+    # No tiny/dust send should be attempted; only meaningful top-up transfers are valid.
+    assert all(call[3] > 1e-8 for call in fake_rpc.sent_calls)
+
+
+def test_worker_fractional_prepare_false_still_funds_definecurrency(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {
+                        "name": "VRSCTEST",
+                        "weight": 0.55,
+                        "initial_contribution": 20,
+                    },
+                    "reserves": [],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "prepare_fractional_identity": False,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+    request_id = resp.json()["request_id"]
+
+    fake_rpc = _FakeFractionalContributionSweepRpc()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    for _ in range(20):
+        worker.process_once()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT status, step_index FROM currency_requests WHERE id = ?", (request_id,)).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "complete"
+    assert row["step_index"] == 6
+
+    native_calls = [
+        call
+        for call in fake_rpc.sent_calls
+        if call[1] == "VRSCTEST" and call[2] == "DPNK@" and call[0] == "RtestAddress"
+    ]
+    assert native_calls
+    assert any(call[3] >= 200.001 for call in native_calls)
+
+
+def test_worker_fractional_submits_all_contribution_sends_in_one_sweep(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {
+                        "name": "VRSCTEST",
+                        "weight": 0.55,
+                        "initial_contribution": 20,
+                    },
+                    "reserves": [
+                        {"name": "SPORTS", "weight": 0.2, "initial_contribution": 0.1},
+                        {"name": "SAILING", "weight": 0.2, "initial_contribution": 0.1},
+                        {"name": "YEN", "weight": 0.05, "initial_contribution": 0.1},
+                    ],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "prepare_fractional_identity": False,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+
+    fake_rpc = _FakeFractionalContributionSweepRpc()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    # Sweep 1: pending -> step0 (skipped identity prep)
+    worker.process_once()
+    # Sweep 2: step3 -> step4
+    worker.process_once()
+    # Sweep 3: step4 submits all needed top-ups without per-transfer waits
+    worker.process_once()
+
+    contribution_calls = [call for call in fake_rpc.sent_calls if call[2] == "DPNK@"]
+    assert len(contribution_calls) == 4
+    assert any(call[1] == "VRSCTEST" and call[3] >= 200.001 for call in contribution_calls)

@@ -314,6 +314,47 @@ def test_plan_endpoint_fractional_allows_missing_supply_when_not_creating_reserv
     assert resp.status_code == 202
 
 
+def test_plan_endpoint_parent_allowlist_is_case_insensitive(monkeypatch, tmp_path):
+    monkeypatch.setenv("REGISTRAR_ALLOWED_PARENTS", "Sailing.VRSCTEST,Sports.VRSCTEST, VRSCTEST")
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.post(
+        "/api/currency/plan",
+        json={
+            "name": "DPNK",
+            "parent": "VRSCTEST",
+            "native_coin": "VRSCTEST",
+            "primary_raddress": "RtestAddress",
+            "mode": "fractional",
+            "fractional": {
+                "initial_supply": 325000,
+                "id_registration_fees": 50,
+                "id_referral_levels": 0,
+                "start_block": 28000,
+                "native": {
+                    "name": "VRSCTEST",
+                    "weight": 0.55,
+                    "initial_contribution": 20,
+                },
+                "reserves": [
+                    {
+                        "name": "SPORTS",
+                        "weight": 0.2,
+                        "initial_contribution": 0.1,
+                    }
+                ],
+                "define_funding_amount": 200.001,
+                "create_reserves": False,
+                "prepare_fractional_identity": True,
+                "identity_exists": False,
+            },
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 202
+
+
 def test_plan_endpoint_rejects_missing_mode_section(monkeypatch, tmp_path):
     client = next(_build_client(monkeypatch, tmp_path))
 
@@ -354,6 +395,40 @@ def test_plan_endpoint_rejects_invalid_mode(monkeypatch, tmp_path):
     assert resp.status_code == 400
 
 
+def test_plan_endpoint_accepts_mixed_case_fractional_token_mode(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.post(
+        "/api/currency/plan",
+        json={
+            "name": "DPNK",
+            "parent": "VRSCTEST",
+            "native_coin": "VRSCTEST",
+            "primary_raddress": "RtestAddress",
+            "mode": "FrAcTiOnAl_ToKeN",
+            "fractional": {
+                "initial_supply": 325000,
+                "id_registration_fees": 50,
+                "id_referral_levels": 0,
+                "start_block": 28000,
+                "native": {
+                    "name": "VRSCTEST",
+                    "weight": 0.55,
+                    "initial_contribution": 20,
+                },
+                "reserves": [],
+                "create_reserves": False,
+                "prepare_fractional_identity": True,
+                "identity_exists": False,
+            },
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 202
+    assert resp.json()["workflow_type"] == "fractional_token"
+
+
 def test_plan_template_endpoint_auto_mode(monkeypatch, tmp_path):
     client = next(_build_client(monkeypatch, tmp_path))
 
@@ -377,6 +452,16 @@ def test_plan_template_endpoint_fractional_mode_contains_identity_flags(monkeypa
     fractional = body["template"]["fractional"]
     assert fractional["identity_exists"] is False
     assert fractional["reserves"][0]["identity_exists"] is False
+
+
+def test_plan_template_endpoint_mode_query_is_case_insensitive(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.get("/api/currency/plan/template?mode=FrAcTiOnAl_ToKeN")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "fractional_token"
+    assert body["template"]["mode"] == "fractional_token"
 
 
 def test_plan_template_endpoint_simple_mode(monkeypatch, tmp_path):
@@ -405,3 +490,6 @@ def test_currency_plan_reference_form(monkeypatch, tmp_path):
     assert "Currency Plan Console" in resp.text
     assert "currency-plan-form" in resp.text
     assert "/api/currency/plan/template" in resp.text
+    assert '<option value="auto">auto</option>' in resp.text
+    assert '<option value="simple_token">simple_token</option>' in resp.text
+    assert '<option value="fractional_token">fractional_token</option>' in resp.text

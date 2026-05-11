@@ -635,6 +635,10 @@ def _resolve_daemon_by_native_coin(native_coin: str) -> str | None:
     return None
 
 
+def _normalize_parent_namespace(value: str) -> str:
+    return value.strip().lower()
+
+
 def _allowed_parent_namespaces() -> set[str]:
     configured: set[str] = set()
 
@@ -642,12 +646,12 @@ def _allowed_parent_namespaces() -> set[str]:
     for env_name in ("REGISTRAR_ALLOWED_PARENT", "PARENT"):
         value = os.getenv(env_name, "").strip()
         if value:
-            configured.add(value)
+            configured.add(_normalize_parent_namespace(value))
 
     # Preferred comma-separated allowlist.
     raw_list = os.getenv("REGISTRAR_ALLOWED_PARENTS", "").strip()
     if raw_list:
-        configured.update(item.strip() for item in raw_list.split(",") if item.strip())
+        configured.update(_normalize_parent_namespace(item) for item in raw_list.split(",") if item.strip())
 
     return configured
 
@@ -867,7 +871,7 @@ def register_identity(request: RegisterRequest, api_key: str = Security(_require
     )
 
     allowed_parents = _allowed_parent_namespaces()
-    parent_normalized = request.parent.strip()
+    parent_normalized = _normalize_parent_namespace(request.parent)
     logger.debug(
         "api.register.parent_validation requested_parent=%s normalized_parent=%s allowed_parents=%s",
         request.parent,
@@ -1129,7 +1133,7 @@ def _build_currency_request_response(request_id: str, status: str, workflow_type
 
 def _validate_currency_parent_or_403(parent: str):
     allowed_parents = _allowed_parent_namespaces()
-    parent_normalized = parent.strip().lower()
+    parent_normalized = _normalize_parent_namespace(parent)
     if allowed_parents and parent_normalized not in allowed_parents:
         raise HTTPException(
             status_code=403,

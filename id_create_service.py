@@ -6,7 +6,7 @@ from fastapi import Security
 from fastapi import status
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from contextlib import asynccontextmanager
 import os
 import json
@@ -84,7 +84,11 @@ class StorageUploadRequest(BaseModel):
 
 class ReserveCurrencySpec(BaseModel):
     name: str = Field(description="Reserve currency name.", examples=["TENNIS"])
-    supply: float = Field(description="Reserve token total supply to preallocate.", examples=[80000])
+    supply: float | None = Field(
+        default=None,
+        description="Reserve token total supply to preallocate (required only when create_reserves is true).",
+        examples=[80000],
+    )
     weight: float = Field(description="Fractional basket reserve weight.", examples=[0.25])
     initial_contribution: float = Field(description="Initial contribution sent into the fractional identity.", examples=[40000])
 
@@ -124,6 +128,17 @@ class CreateFractionalCurrencyRequest(BaseModel):
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
     prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
 
+    @model_validator(mode="after")
+    def _validate_reserve_supply_when_creating(self):
+        if self.create_reserves:
+            missing_supply = [reserve.name for reserve in self.reserves if reserve.supply is None]
+            if missing_supply:
+                names = ", ".join(missing_supply)
+                raise ValueError(
+                    f"fractional.reserves[].supply is required when create_reserves is true (missing for: {names})"
+                )
+        return self
+
 
 class CurrencySimplePlan(BaseModel):
     pre_allocation_id: str = Field(default="blockoneminer@", description="Identity receiving pre-allocation.")
@@ -145,6 +160,17 @@ class CurrencyFractionalPlan(BaseModel):
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
     prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
+
+    @model_validator(mode="after")
+    def _validate_reserve_supply_when_creating(self):
+        if self.create_reserves:
+            missing_supply = [reserve.name for reserve in self.reserves if reserve.supply is None]
+            if missing_supply:
+                names = ", ".join(missing_supply)
+                raise ValueError(
+                    f"fractional.reserves[].supply is required when create_reserves is true (missing for: {names})"
+                )
+        return self
 
 
 class CreateCurrencyPlanRequest(BaseModel):

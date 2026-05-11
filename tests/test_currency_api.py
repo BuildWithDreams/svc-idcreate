@@ -94,6 +94,91 @@ def test_create_fractional_currency_request(monkeypatch, tmp_path):
     assert status_body["payload"]["prepare_fractional_identity"] is False
 
 
+def test_create_fractional_currency_request_allows_missing_supply_when_not_creating_reserves(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    payload = {
+        "name": "DPNK",
+        "parent": "VRSCTEST",
+        "native_coin": "VRSCTEST",
+        "primary_raddress": "RtestAddress",
+        "initial_supply": 325000,
+        "id_registration_fees": 777,
+        "id_referral_levels": 3,
+        "start_block": 1057000,
+        "native": {
+            "name": "VRSCTEST",
+            "weight": 0.55,
+            "initial_contribution": 20,
+        },
+        "reserves": [
+            {
+                "name": "SPORTS",
+                "weight": 0.2,
+                "initial_contribution": 0.1,
+            },
+            {
+                "name": "SAILING",
+                "weight": 0.2,
+                "initial_contribution": 0.1,
+            },
+            {
+                "name": "YEN",
+                "weight": 0.05,
+                "initial_contribution": 0.1,
+            },
+        ],
+        "define_funding_amount": 200.001,
+        "create_reserves": False,
+        "prepare_fractional_identity": True,
+    }
+    resp = client.post(
+        "/api/currency/fractional",
+        json=payload,
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 202
+
+
+def test_create_fractional_currency_request_requires_supply_when_creating_reserves(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    payload = {
+        "name": "DPNK",
+        "parent": "VRSCTEST",
+        "native_coin": "VRSCTEST",
+        "primary_raddress": "RtestAddress",
+        "initial_supply": 325000,
+        "id_registration_fees": 777,
+        "id_referral_levels": 3,
+        "start_block": 1057000,
+        "native": {
+            "name": "VRSCTEST",
+            "weight": 0.55,
+            "initial_contribution": 20,
+        },
+        "reserves": [
+            {
+                "name": "SPORTS",
+                "weight": 0.2,
+                "initial_contribution": 0.1,
+            }
+        ],
+        "define_funding_amount": 200.001,
+        "create_reserves": True,
+        "prepare_fractional_identity": True,
+    }
+    resp = client.post(
+        "/api/currency/fractional",
+        json=payload,
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 422
+    assert "fractional.reserves[].supply is required when create_reserves is true" in str(resp.json())
+
+
 def test_currency_request_rejects_missing_api_key(monkeypatch, tmp_path):
     client = next(_build_client(monkeypatch, tmp_path))
 
@@ -178,6 +263,55 @@ def test_plan_endpoint_explicit_fractional(monkeypatch, tmp_path):
     assert status_resp.status_code == 200
     status_body = status_resp.json()
     assert status_body["payload"]["prepare_fractional_identity"] is False
+
+
+def test_plan_endpoint_fractional_allows_missing_supply_when_not_creating_reserves(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.post(
+        "/api/currency/plan",
+        json={
+            "name": "DPNK",
+            "parent": "VRSCTEST",
+            "native_coin": "VRSCTEST",
+            "primary_raddress": "RtestAddress",
+            "mode": "fractional",
+            "fractional": {
+                "initial_supply": 325000,
+                "id_registration_fees": 777,
+                "id_referral_levels": 3,
+                "start_block": 1057000,
+                "native": {
+                    "name": "VRSCTEST",
+                    "weight": 0.55,
+                    "initial_contribution": 20,
+                },
+                "reserves": [
+                    {
+                        "name": "SPORTS",
+                        "weight": 0.2,
+                        "initial_contribution": 0.1,
+                    },
+                    {
+                        "name": "SAILING",
+                        "weight": 0.2,
+                        "initial_contribution": 0.1,
+                    },
+                    {
+                        "name": "YEN",
+                        "weight": 0.05,
+                        "initial_contribution": 0.1,
+                    },
+                ],
+                "define_funding_amount": 200.001,
+                "create_reserves": False,
+                "prepare_fractional_identity": True,
+            },
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 202
 
 
 def test_plan_endpoint_rejects_missing_mode_section(monkeypatch, tmp_path):

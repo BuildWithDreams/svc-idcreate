@@ -39,7 +39,7 @@ def _amount_epsilon() -> float:
 
 
 def _conversion_pc_fee() -> float:
-    raw = os.getenv("CURRENCY_CONVERSION_PC_FEE", "0.00025")
+    raw = os.getenv("CURRENCY_CONVERSION_PC_FEE", "0.0005")
     try:
         value = float(raw)
     except Exception:

@@ -918,6 +918,14 @@ def test_worker_fractional_define_initial_contributions_apply_conversion_fee(mon
     assert row["step_index"] == 6
     assert fake_rpc.last_define_options is not None
 
+    reserve_funding_calls = [
+        call
+        for call in fake_rpc.sent_calls
+        if call[0] == "RtestAddress" and call[1] == "SPORTS" and call[2] == "DPNK@"
+    ]
+    assert reserve_funding_calls
+    assert reserve_funding_calls[0][3] == pytest.approx(0.1, rel=0, abs=1e-8)
+
     expected_native = 20 * (1 - 0.00025)
     expected_reserve = 0.1 * (1 - 0.00025)
     initial_contributions = fake_rpc.last_define_options["initialcontributions"]

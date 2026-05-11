@@ -872,7 +872,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         return
 
     if step == 4:
-        contributions = progress.setdefault("effective_initial_contributions", {})
+        contributions = progress.setdefault("funded_initial_contributions", {})
         native = payload["native"]
         reserves = payload.get("reserves", [])
         target_identity = f"{name}@"
@@ -912,10 +912,10 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                     source_identity=payload["primary_raddress"],
                     context_hint="native contribution before fractional definecurrency",
                     wait_for_confirmation=True,
-                    apply_conversion_fee=True,
+                    apply_conversion_fee=False,
                 )
                 contributions["native"] = native_amount
-                progress["effective_initial_contributions"] = contributions
+                progress["funded_initial_contributions"] = contributions
                 _record_pending_wait(wait)
                 progress["fund_index"] = 1
                 continue
@@ -957,11 +957,11 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                         else "reserve contribution with pre-existing reserve currency"
                     ),
                     wait_for_confirmation=True,
-                    apply_conversion_fee=True,
+                    apply_conversion_fee=False,
                 )
                 reserve_effective = contributions.setdefault("reserves", {})
                 reserve_effective[reserve_name] = reserve_amount
-                progress["effective_initial_contributions"] = contributions
+                progress["funded_initial_contributions"] = contributions
                 _record_pending_wait(wait)
                 progress["fund_index"] = fund_index + 1
                 continue
@@ -972,12 +972,12 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
     if step == 5:
         native = payload["native"]
         reserves = payload.get("reserves", [])
-        effective = progress.get("effective_initial_contributions", {})
-        reserve_effective = effective.get("reserves", {}) if isinstance(effective.get("reserves"), dict) else {}
+        funded = progress.get("funded_initial_contributions", {})
+        reserve_funded = funded.get("reserves", {}) if isinstance(funded.get("reserves"), dict) else {}
         pending_funding_waits = progress.get("pending_funding_waits", []) if isinstance(progress.get("pending_funding_waits", []), list) else []
         epsilon = _amount_epsilon()
-        native_effective = effective.get("native", native["initial_contribution"])
-        initial_contributions = [native_effective]
+        native_funded = float(funded.get("native", native["initial_contribution"]))
+        initial_contributions = [_effective_contribution_amount(native_funded, apply_conversion_fee=True)]
 
         # Do not define until all previously submitted funding sends are confirmed.
         unresolved_waits: list[dict[str, str]] = []
@@ -1018,8 +1018,8 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
 
         progress["pending_funding_waits"] = []
 
-        # Ensure funding is actually visible on-chain before definecurrency.
-        required_native_balance = _normalize_amount(max(float(payload["define_funding_amount"]), float(native_effective)))
+        # Ensure full requested contributions are visible before fee-adjusting define payload.
+        required_native_balance = _normalize_amount(max(float(payload["define_funding_amount"]), native_funded))
         current_native_balance = _get_currency_balance_amount(rpc, f"{name}@", native["name"])
         if current_native_balance + epsilon < required_native_balance:
             logger.info(
@@ -1038,7 +1038,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         for reserve in reserves:
             currencies.append(reserve["name"])
             weights.append(reserve["weight"])
-            reserve_required = float(reserve_effective.get(reserve["name"], reserve["initial_contribution"]))
+            reserve_required = float(reserve_funded.get(reserve["name"], reserve["initial_contribution"]))
             current_reserve_balance = _get_currency_balance_amount(rpc, f"{name}@", reserve["name"])
             if current_reserve_balance + epsilon < reserve_required:
                 logger.info(
@@ -1051,7 +1051,14 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 )
                 _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
                 return
-            initial_contributions.append(reserve_required)
+            initial_contributions.append(_effective_contribution_amount(reserve_required, apply_conversion_fee=True))
+
+        logger.info(
+            "currency.fractional.define.apply_conversion_fee request_id=%s fee=%s initial_contributions=%s",
+            row["id"],
+            _conversion_pc_fee(),
+            _safe_log_json(initial_contributions),
+        )
 
         options = {
             "name": name,

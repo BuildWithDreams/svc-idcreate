@@ -461,10 +461,16 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
 
     reserve = reserves[reserve_index]
     reserve_name = reserve["name"]
+    reserve_identity_exists = bool(reserve.get("identity_exists", False))
     parent = payload["parent"]
     reserve_progress = progress.setdefault("reserves", {}).setdefault(reserve_name, {})
 
     if reserve_phase == 0:
+        if reserve_identity_exists:
+            progress["reserve_phase"] = 2
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=3, progress=progress)
+            return
+
         rnc_response = rpc.register_name_commitment(
             reserve_name,
             payload["primary_raddress"],
@@ -489,6 +495,11 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
         return
 
     if reserve_phase == 1:
+        if reserve_identity_exists:
+            progress["reserve_phase"] = 2
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=3, progress=progress)
+            return
+
         full_name = f"{reserve_name}.{parent}"
         identity_payload = _build_identity_payload(full_name, payload["primary_raddress"])
         fee_offer = _resolve_fee_offer(rpc, parent)
@@ -568,11 +579,16 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
     name = payload["name"]
     parent = payload["parent"]
     prepare_fractional_identity = bool(payload.get("prepare_fractional_identity", True))
+    fractional_identity_exists = bool(payload.get("identity_exists", False))
     create_reserves = bool(payload.get("create_reserves", True))
 
     if step == 0:
         if not prepare_fractional_identity:
             _save_currency_state(conn, row["id"], status="in_progress", step_index=3, progress=progress)
+            return
+
+        if fractional_identity_exists:
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=2, progress=progress)
             return
 
         rnc_response = rpc.register_name_commitment(
@@ -598,6 +614,10 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         return
 
     if step == 1:
+        if fractional_identity_exists:
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=2, progress=progress)
+            return
+
         full_name = f"{name}.{parent}"
         identity_payload = _build_identity_payload(full_name, payload["primary_raddress"])
         fee_offer = _resolve_fee_offer(rpc, parent)
@@ -682,12 +702,13 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         reserve_pos = fund_index - 1
         if reserve_pos < len(reserves):
             reserve = reserves[reserve_pos]
+            reserve_source_identity = payload["allocation_id"] if create_reserves else payload["primary_raddress"]
             reserve_amount, wait = _ensure_initial_contribution(
                 rpc,
                 target_identity=target_identity,
                 currency_name=reserve["name"],
                 requested_amount=reserve["initial_contribution"],
-                source_identity=payload["allocation_id"],
+                source_identity=reserve_source_identity,
             )
             reserve_effective = contributions.setdefault("reserves", {})
             reserve_effective[reserve["name"]] = reserve_amount

@@ -89,6 +89,10 @@ class ReserveCurrencySpec(BaseModel):
         description="Reserve token total supply to preallocate (required only when create_reserves is true).",
         examples=[80000],
     )
+    identity_exists: bool = Field(
+        default=False,
+        description="If true, reserve VerusID already exists and reserve identity creation steps are skipped.",
+    )
     weight: float = Field(description="Fractional basket reserve weight.", examples=[0.25])
     initial_contribution: float = Field(description="Initial contribution sent into the fractional identity.", examples=[40000])
 
@@ -127,6 +131,10 @@ class CreateFractionalCurrencyRequest(BaseModel):
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
     prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
+    identity_exists: bool = Field(
+        default=False,
+        description="If true, fractional VerusID already exists and fractional identity creation steps are skipped.",
+    )
 
     @model_validator(mode="after")
     def _validate_reserve_supply_when_creating(self):
@@ -160,6 +168,10 @@ class CurrencyFractionalPlan(BaseModel):
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
     prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
+    identity_exists: bool = Field(
+        default=False,
+        description="If true, fractional VerusID already exists and fractional identity creation steps are skipped.",
+    )
 
     @model_validator(mode="after")
     def _validate_reserve_supply_when_creating(self):
@@ -1211,6 +1223,7 @@ def _enqueue_fractional_currency_request(
         "define_funding_amount": plan.define_funding_amount,
         "create_reserves": plan.create_reserves,
         "prepare_fractional_identity": plan.prepare_fractional_identity,
+        "identity_exists": plan.identity_exists,
     }
 
     _create_currency_request_record(
@@ -1256,12 +1269,14 @@ def _currency_plan_template(mode: str = "auto") -> dict:
             {
                 "name": "TENNIS",
                 "supply": 80000,
+                "identity_exists": False,
                 "weight": 0.25,
                 "initial_contribution": 40000,
             },
             {
                 "name": "SAILING",
                 "supply": 80000,
+                "identity_exists": False,
                 "weight": 0.25,
                 "initial_contribution": 40000,
             },
@@ -1270,6 +1285,7 @@ def _currency_plan_template(mode: str = "auto") -> dict:
         "define_funding_amount": 200.001,
         "create_reserves": True,
         "prepare_fractional_identity": True,
+        "identity_exists": False,
     }
 
     template = {
@@ -1343,6 +1359,7 @@ def create_fractional_currency(request: CreateFractionalCurrencyRequest, api_key
         define_funding_amount=request.define_funding_amount,
         create_reserves=request.create_reserves,
         prepare_fractional_identity=request.prepare_fractional_identity,
+        identity_exists=request.identity_exists,
     )
     return _enqueue_fractional_currency_request(
         name=request.name,

@@ -363,6 +363,20 @@ def test_plan_template_endpoint_auto_mode(monkeypatch, tmp_path):
     assert body["mode"] == "auto"
     assert "simple" in body["template"]
     assert "fractional" in body["template"]
+    assert "identity_exists" in body["template"]["fractional"]
+    assert "identity_exists" in body["template"]["fractional"]["reserves"][0]
+
+
+def test_plan_template_endpoint_fractional_mode_contains_identity_flags(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.get("/api/currency/plan/template?mode=fractional")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["template"]["mode"] == "fractional_token"
+    fractional = body["template"]["fractional"]
+    assert fractional["identity_exists"] is False
+    assert fractional["reserves"][0]["identity_exists"] is False
 
 
 def test_plan_template_endpoint_simple_mode(monkeypatch, tmp_path):

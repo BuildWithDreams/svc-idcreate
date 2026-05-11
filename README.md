@@ -241,6 +241,53 @@ Cron example (every minute):
 * * * * * cd /home/mylo/dev/sf/svc-idcreate && /home/mylo/.local/bin/uv run python worker.py >> /var/log/svc-idcreate-worker.log 2>&1
 ```
 
+### Currency Plan API notes
+
+Use `POST /api/currency/plan` for unified simple/fractional workflows and
+`GET /api/currency/plan/template` for a current reference payload.
+
+Fractional plan identity flags:
+
+- `fractional.identity_exists`:
+	- `true` skips fractional VerusID namecommit/register steps.
+	- Funding and contribution transfer steps still run before fractional define.
+- `fractional.reserves[].identity_exists`:
+	- `true` skips reserve VerusID namecommit/register steps for that reserve.
+	- Reserve funding/define and contribution transfer still run.
+
+Fractional reserve supply rule:
+
+- `fractional.reserves[].supply` is required only when `fractional.create_reserves=true`.
+
+Example fractional section:
+
+```json
+{
+	"initial_supply": 325000,
+	"id_registration_fees": 777,
+	"id_referral_levels": 3,
+	"start_block": 1057000,
+	"native": {
+		"name": "VRSCTEST",
+		"weight": 0.55,
+		"initial_contribution": 20
+	},
+	"reserves": [
+		{
+			"name": "SPORTS",
+			"supply": 80000,
+			"identity_exists": true,
+			"weight": 0.2,
+			"initial_contribution": 0.1
+		}
+	],
+	"define_funding_amount": 200.001,
+	"create_reserves": true,
+	"prepare_fractional_identity": true,
+	"identity_exists": true
+}
+```
+
 ### Webhook delivery behavior
 
 When status reaches `complete` or `failed`, worker attempts POST delivery to `webhook_url`.

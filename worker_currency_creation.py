@@ -1022,7 +1022,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         # Step 4: plan all required top-ups first, then submit one sendcurrency call per source identity.
         native_initial_required = _normalize_amount(float(native["initial_contribution"]))
         define_funding_required = _normalize_amount(float(payload["define_funding_amount"]))
-        native_total_required = _normalize_amount(max(native_initial_required, define_funding_required))
+        native_total_required = _normalize_amount(native_initial_required + define_funding_required)
         contributions["native"] = native_initial_required
         reserve_contributions = contributions.setdefault("reserves", {})
 
@@ -1201,7 +1201,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         progress["pending_funding_waits"] = []
 
         # Ensure full requested contributions are visible before fee-adjusting define payload.
-        required_native_balance = _normalize_amount(max(float(payload["define_funding_amount"]), native_funded))
+        required_native_balance = _normalize_amount(float(payload["define_funding_amount"]) + native_funded)
         current_native_balance = _get_currency_balance_amount(rpc, f"{name}@", native["name"])
         if current_native_balance + epsilon < required_native_balance:
             logger.info(

@@ -1057,6 +1057,64 @@ def test_worker_fractional_define_initial_contributions_apply_conversion_fee(mon
     assert initial_contributions[1] == pytest.approx(expected_reserve, rel=0, abs=1e-8)
 
 
+def test_worker_fractional_native_shortfall_uses_define_plus_initial(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {
+                        "name": "VRSCTEST",
+                        "weight": 1.0,
+                        "initial_contribution": 0.5,
+                    },
+                    "reserves": [],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+
+    fake_rpc = _FakeFractionalContributionSweepRpc()
+    # Pre-funded native balance is above define_funding but below define_funding + native_initial.
+    fake_rpc.balances.setdefault("DPNK@", {})["VRSCTEST"] = 200.101
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    # pending->step0, step2->step3, step3->step4, step4 funding
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+
+    native_calls = [
+        call
+        for call in fake_rpc.sent_calls
+        if call[0] == "RtestAddress" and call[1] == "VRSCTEST" and call[2] == "DPNK@"
+    ]
+    assert native_calls
+    # Required is 200.001 + 0.5 = 200.501, current is 200.101 -> shortfall 0.4.
+    assert native_calls[0][3] == pytest.approx(0.4, rel=0, abs=1e-8)
+
+
 def test_worker_fractional_step4_does_not_resubmit_while_pending_waits_unresolved(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))

@@ -1036,6 +1036,28 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 }
             )
 
+        funding_plan_summary = []
+        for source_identity, params in params_by_source.items():
+            total_amount = _normalize_amount(sum(float(item.get("amount", 0.0)) for item in params))
+            currencies = [str(item.get("currency")) for item in params]
+            funding_plan_summary.append(
+                {
+                    "source": source_identity,
+                    "outputs": len(params),
+                    "currencies": currencies,
+                    "total_amount": total_amount,
+                }
+            )
+
+        logger.info(
+            "currency.fractional.funding_plan_summary request_id=%s target_identity=%s plan_entries=%s total_outputs=%s details=%s",
+            row["id"],
+            target_identity,
+            len(params_by_source),
+            len(funding_plan),
+            _safe_log_json(funding_plan_summary),
+        )
+
         for source_identity, params in params_by_source.items():
             waits = _submit_funding_transfers(rpc, source_identity, params)
             for wait in waits:

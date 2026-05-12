@@ -764,6 +764,12 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
             payload["define_funding_amount"],
         )
         wait_type, wait_value = _extract_operation_or_txid(result)
+        wait_type, wait_value = _prefer_txid_wait(
+            rpc,
+            wait_type,
+            wait_value,
+            log_context=f"fractional_reserve_define_funding request_id={row['id']} reserve={reserve_name}",
+        )
         progress["reserve_phase"] = 3
         _save_currency_state(
             conn,
@@ -958,10 +964,59 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
         target_identity = f"{name}@"
         pending_funding_waits = progress.setdefault("pending_funding_waits", [])
 
+        # Resolve any previously submitted funding waits first, before planning new sends.
+        if isinstance(pending_funding_waits, list) and pending_funding_waits:
+            unresolved_waits: list[dict[str, str]] = []
+            for wait in pending_funding_waits:
+                if not isinstance(wait, dict):
+                    continue
+                wait_type = wait.get("wait_type")
+                wait_value = wait.get("wait_value")
+                if not isinstance(wait_type, str) or not isinstance(wait_value, str) or not wait_value:
+                    continue
+
+                if wait_type == "tx_confirm":
+                    confirmations = get_tx_confirmations(rpc, wait_value)
+                    if confirmations <= 0:
+                        unresolved_waits.append({"wait_type": "tx_confirm", "wait_value": wait_value})
+                    continue
+
+                if wait_type == "opid_txid":
+                    txid = poll_operation_for_txid(rpc, wait_value)
+                    if not txid:
+                        unresolved_waits.append({"wait_type": "opid_txid", "wait_value": wait_value})
+                    else:
+                        logger.info(
+                            "currency.fractional.funding_wait_promoted request_id=%s opid=%s txid=%s",
+                            row["id"],
+                            wait_value,
+                            txid,
+                        )
+                        unresolved_waits.append({"wait_type": "tx_confirm", "wait_value": txid})
+                    continue
+
+                unresolved_waits.append({"wait_type": wait_type, "wait_value": wait_value})
+
+            progress["pending_funding_waits"] = unresolved_waits
+            if unresolved_waits:
+                logger.info(
+                    "currency.fractional.step4.wait_funding_confirms request_id=%s pending_waits=%s",
+                    row["id"],
+                    len(unresolved_waits),
+                )
+                _save_currency_state(conn, row["id"], status="in_progress", step_index=4, progress=progress)
+                return
+
         def _record_pending_wait(wait: tuple[str, str] | None):
             if wait is None:
                 return
             wait_type, wait_value = wait
+            logger.info(
+                "currency.fractional.funding_wait_added request_id=%s wait_type=%s wait_value=%s",
+                row["id"],
+                wait_type,
+                wait_value,
+            )
             pending_funding_waits.append({"wait_type": wait_type, "wait_value": wait_value})
 
         # Step 4: plan all required top-ups first, then submit one sendcurrency call per source identity.
@@ -1122,6 +1177,12 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 if not txid:
                     unresolved_waits.append({"wait_type": "opid_txid", "wait_value": wait_value})
                 else:
+                    logger.info(
+                        "currency.fractional.define.funding_wait_promoted request_id=%s opid=%s txid=%s",
+                        row["id"],
+                        wait_value,
+                        txid,
+                    )
                     unresolved_waits.append({"wait_type": "tx_confirm", "wait_value": txid})
                 continue
 
@@ -1173,6 +1234,24 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
                 return
             initial_contributions.append(_effective_contribution_amount(reserve_required, apply_conversion_fee=True))
+
+        # Sanity gate: require one additional sweep with balances still satisfied before define.
+        sanity_signature = {
+            "required_native_balance": required_native_balance,
+            "native_currency": native["name"],
+            "reserve_count": len(reserves),
+        }
+        previous_sanity_signature = progress.get("predefine_balance_sanity")
+        if previous_sanity_signature != sanity_signature:
+            progress["predefine_balance_sanity"] = sanity_signature
+            logger.info(
+                "currency.fractional.define.balance_sanity_pending request_id=%s signature=%s",
+                row["id"],
+                _safe_log_json(sanity_signature),
+            )
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
+            return
+        progress.pop("predefine_balance_sanity", None)
 
         logger.info(
             "currency.fractional.define.apply_conversion_fee request_id=%s fee=%s initial_contributions=%s",

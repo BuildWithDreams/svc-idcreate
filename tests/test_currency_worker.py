@@ -338,6 +338,99 @@ class _FakeFractionalPendingFundingRpc:
             self._confirmations[txid] = 1
 
 
+class _FakeFractionalOpidFundingRpc:
+    def __init__(self):
+        self.batch_sent_calls = []
+        self.send_calls = 0
+        self.define_calls = 0
+        self._opid = "opid-batch-1"
+        self._resolved_txid = "f" * 64
+        self._opid_resolved = False
+        self._confirmations = 0
+        self.balances = {
+            "RtestAddress": {
+                "VRSCTEST": 999999.0,
+                "SPORTS": 999999.0,
+            },
+            "DPNK@": {
+                "VRSCTEST": 0.0,
+                "SPORTS": 0.0,
+            },
+        }
+
+    def get_currency(self, currency_name_or_id):
+        return {"idregistrationfees": 25}
+
+    def get_currency_balance(self, holder):
+        return dict(self.balances.get(holder, {}))
+
+    def send_currency(self, from_address, params):
+        self.send_calls += 1
+        self.batch_sent_calls.append((from_address, [dict(item) for item in params]))
+        for item in params:
+            source_balances = self.balances.setdefault(from_address, {})
+            source_balances[item["currency"]] = float(source_balances.get(item["currency"], 0.0)) - float(item["amount"])
+            target_balances = self.balances.setdefault(item["address"], {})
+            target_balances[item["currency"]] = float(target_balances.get(item["currency"], 0.0)) + float(item["amount"])
+        return self._opid
+
+    def z_get_operation_status(self, opids):
+        if not self._opid_resolved:
+            return []
+        return [{"result": {"txid": self._resolved_txid}}]
+
+    def get_raw_transaction(self, txid, verbose=1):
+        if txid == self._resolved_txid:
+            return {"txid": txid, "confirmations": self._confirmations}
+        return {"txid": txid, "confirmations": 1}
+
+    def define_currency(self, options):
+        self.define_calls += 1
+        return "d" * 64
+
+    def resolve_opid(self):
+        self._opid_resolved = True
+
+    def confirm_tx(self):
+        self._confirmations = 1
+
+
+class _FakeReserveFundingImmediateTxidRpc:
+    def __init__(self):
+        self.sent_calls = []
+
+    def get_currency(self, currency_name_or_id):
+        return {"idregistrationfees": 25}
+
+    def get_currency_balance(self, holder):
+        return {"VRSCTEST": 1000.0}
+
+    def send_currency_simple_to_identity(self, from_address, currency, identity, amount):
+        self.sent_calls.append((from_address, currency, identity, amount))
+        return "opid-reserve-funding"
+
+    def z_get_operation_status(self, opid):
+        return [{"result": {"txid": "9" * 64}}]
+
+    def get_raw_transaction(self, txid, verbose=1):
+        return {"txid": txid, "confirmations": 1}
+
+    def register_name_commitment(self, name, primary_raddress, referral_id, parent, source_of_funds):
+        return {
+            "txid": "a" * 64,
+            "namereservation": {"name": name, "salt": "abc123"},
+        }
+
+    def register_identity(self, json_namecommitment_response, json_identity, source_of_funds, fee_offer=80):
+        return "b" * 64
+
+    def define_simple_token_currency(self, options, name, id_registration_fees, pre_allocations, proof_protocol):
+        return "c" * 64
+
+    def define_currency(self, options):
+        return "d" * 64
+
+
 def test_worker_advances_simple_currency_to_complete(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
@@ -962,3 +1055,181 @@ def test_worker_fractional_define_initial_contributions_apply_conversion_fee(mon
 
     assert initial_contributions[0] == pytest.approx(expected_native, rel=0, abs=1e-8)
     assert initial_contributions[1] == pytest.approx(expected_reserve, rel=0, abs=1e-8)
+
+
+def test_worker_fractional_step4_does_not_resubmit_while_pending_waits_unresolved(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {"name": "VRSCTEST", "weight": 0.55, "initial_contribution": 20},
+                    "reserves": [{"name": "SPORTS", "weight": 0.2, "initial_contribution": 0.1}],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+
+    fake_rpc = _FakeFractionalOpidFundingRpc()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    # Reach step 4 and submit first batched funding tx (opid).
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+    assert fake_rpc.send_calls == 1
+
+    # While opid unresolved, step 4 must not re-submit funding.
+    worker.process_once()
+    worker.process_once()
+    assert fake_rpc.send_calls == 1
+
+
+def test_worker_fractional_step4_waits_across_opid_to_txid_to_confirm_without_resubmit(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {"name": "VRSCTEST", "weight": 0.55, "initial_contribution": 20},
+                    "reserves": [{"name": "SPORTS", "weight": 0.2, "initial_contribution": 0.1}],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+
+    fake_rpc = _FakeFractionalOpidFundingRpc()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    # Reach step 4 and submit first batched funding tx (opid).
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+    assert fake_rpc.send_calls == 1
+
+    # Opid resolves to txid but tx still unconfirmed; should still not re-submit.
+    fake_rpc.resolve_opid()
+    worker.process_once()
+    worker.process_once()
+    assert fake_rpc.send_calls == 1
+    assert fake_rpc.define_calls == 0
+
+    # After confirm, flow can continue toward define without duplicate funding sends.
+    fake_rpc.confirm_tx()
+    for _ in range(20):
+        worker.process_once()
+
+    assert fake_rpc.send_calls == 1
+    assert fake_rpc.define_calls >= 1
+
+
+def test_worker_fractional_reserve_phase2_promotes_immediate_opid_to_txid(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {"name": "VRSCTEST", "weight": 0.55, "initial_contribution": 20},
+                    "reserves": [
+                        {
+                            "name": "SPORTS",
+                            "supply": 80000,
+                            "identity_exists": True,
+                            "weight": 0.2,
+                            "initial_contribution": 0.1,
+                        }
+                    ],
+                    "allocation_id": "blockoneminer@",
+                    "define_funding_amount": 200.001,
+                    "create_reserves": True,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+    request_id = resp.json()["request_id"]
+
+    fake_rpc = _FakeReserveFundingImmediateTxidRpc()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    # pending -> step0 (skips to step2 because identity_exists=True)
+    worker.process_once()
+    # step2 -> step3
+    worker.process_once()
+    # step3 phase0: reserve identity_exists=True => phase2
+    worker.process_once()
+    # step3 phase2: funding send returns opid that immediately resolves to txid
+    worker.process_once()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT status, step_index, wait_type, wait_value FROM currency_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "waiting_confirm"
+    assert row["step_index"] == 3
+    assert row["wait_type"] == "tx_confirm"
+    assert row["wait_value"] == "9" * 64

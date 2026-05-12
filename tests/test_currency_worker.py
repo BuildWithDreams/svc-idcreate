@@ -231,6 +231,7 @@ class _FakeFractionalDustShortfallRpc:
 class _FakeFractionalContributionSweepRpc:
     def __init__(self):
         self.sent_calls = []
+        self.batch_sent_calls = []
         self.last_define_options = None
         self.balances = {
             "RtestAddress": {
@@ -259,6 +260,17 @@ class _FakeFractionalContributionSweepRpc:
         target_balances[currency] = float(target_balances.get(currency, 0.0)) + float(amount)
         return "c" * 64
 
+    def send_currency(self, from_address, params):
+        self.batch_sent_calls.append((from_address, [dict(item) for item in params]))
+        for item in params:
+            self.send_currency_simple_to_identity(
+                from_address,
+                item["currency"],
+                item["address"],
+                item["amount"],
+            )
+        return "c" * 64
+
     def define_currency(self, options):
         self.last_define_options = dict(options)
         return "d" * 64
@@ -267,6 +279,7 @@ class _FakeFractionalContributionSweepRpc:
 class _FakeFractionalPendingFundingRpc:
     def __init__(self):
         self.sent_calls = []
+        self.batch_sent_calls = []
         self.define_calls = 0
         self._confirmations: dict[str, int] = {}
         self._next_tx = 0
@@ -300,6 +313,20 @@ class _FakeFractionalPendingFundingRpc:
         target_balances = self.balances.setdefault(identity, {})
         # Reflect pending receipt so balance-based checks alone would allow define.
         target_balances[currency] = float(target_balances.get(currency, 0.0)) + float(amount)
+        return txid
+
+    def send_currency(self, from_address, params):
+        self.batch_sent_calls.append((from_address, [dict(item) for item in params]))
+        txid = f"{self._next_tx:064x}"
+        self._next_tx += 1
+        self._confirmations[txid] = 0
+        for item in params:
+            self.sent_calls.append((from_address, item["currency"], item["address"], item["amount"]))
+            source_balances = self.balances.setdefault(from_address, {})
+            source_balances[item["currency"]] = float(source_balances.get(item["currency"], 0.0)) - float(item["amount"])
+            target_balances = self.balances.setdefault(item["address"], {})
+            # Reflect pending receipt so balance-based checks alone would allow define.
+            target_balances[item["currency"]] = float(target_balances.get(item["currency"], 0.0)) + float(item["amount"])
         return txid
 
     def define_currency(self, options):
@@ -395,7 +422,6 @@ def test_worker_fractional_uses_primary_raddress_for_existing_reserve_contributi
                     ],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": True,
                 },
             },
             headers={"X-API-Key": "test-key"},
@@ -463,7 +489,6 @@ def test_worker_fractional_skips_reserve_identity_creation_when_identity_exists(
                     "allocation_id": "blockoneminer@",
                     "define_funding_amount": 200.001,
                     "create_reserves": True,
-                    "prepare_fractional_identity": True,
                 },
             },
             headers={"X-API-Key": "test-key"},
@@ -529,7 +554,6 @@ def test_worker_fractional_skips_main_identity_creation_when_identity_exists(mon
                     ],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": True,
                     "identity_exists": True,
                 },
             },
@@ -594,7 +618,7 @@ def test_worker_fractional_native_dust_shortfall_does_not_submit_send(monkeypatc
                     "reserves": [],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": False,
+                    "identity_exists": True,
                 },
             },
             headers={"X-API-Key": "test-key"},
@@ -650,7 +674,6 @@ def test_worker_fractional_prepare_false_still_funds_definecurrency(monkeypatch,
                     "reserves": [],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": False,
                     "identity_exists": True,
                 },
             },
@@ -717,7 +740,6 @@ def test_worker_fractional_submits_all_contribution_sends_in_one_sweep(monkeypat
                     ],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": False,
                     "identity_exists": True,
                 },
             },
@@ -729,16 +751,23 @@ def test_worker_fractional_submits_all_contribution_sends_in_one_sweep(monkeypat
     fake_rpc = _FakeFractionalContributionSweepRpc()
     monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
 
-    # Sweep 1: pending -> step0 (skipped identity prep)
+    # Sweep 1: pending -> step0 (identity_exists=True sends flow to step2)
     worker.process_once()
-    # Sweep 2: step3 -> step4
+    # Sweep 2: step2 submit define funding
     worker.process_once()
-    # Sweep 3: step4 submits all needed top-ups without per-transfer waits
+    # Sweep 3: waiting_confirm for define-funding send
+    worker.process_once()
+    # Sweep 4: step3 -> step4
+    worker.process_once()
+    # Sweep 5: step4 submits remaining contribution top-ups in one batched send
     worker.process_once()
 
     contribution_calls = [call for call in fake_rpc.sent_calls if call[2] == "DPNK@"]
     assert len(contribution_calls) == 4
     assert any(call[1] == "VRSCTEST" and call[3] >= 200.001 for call in contribution_calls)
+    assert len(fake_rpc.batch_sent_calls) == 1
+    assert fake_rpc.batch_sent_calls[0][0] == "RtestAddress"
+    assert len(fake_rpc.batch_sent_calls[0][1]) == 3
 
 
 def test_worker_fractional_define_waits_until_funding_confirms(monkeypatch, tmp_path):
@@ -770,7 +799,6 @@ def test_worker_fractional_define_waits_until_funding_confirms(monkeypatch, tmp_
                     "reserves": [{"name": "SPORTS", "weight": 0.2, "initial_contribution": 0.1}],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": False,
                     "identity_exists": True,
                 },
             },
@@ -794,7 +822,12 @@ def test_worker_fractional_define_waits_until_funding_confirms(monkeypatch, tmp_
 
     # After confirms, define can proceed.
     fake_rpc.confirm_all()
-    for _ in range(5):
+    for _ in range(8):
+        worker.process_once()
+
+    # Step 4 may submit an additional batched funding tx; confirm again.
+    fake_rpc.confirm_all()
+    for _ in range(12):
         worker.process_once()
 
     conn = sqlite3.connect(str(db_path))
@@ -837,7 +870,6 @@ def test_worker_fractional_define_fee_topup_targets_identity(monkeypatch, tmp_pa
                     "reserves": [],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": False,
                     "identity_exists": True,
                 },
             },
@@ -892,7 +924,6 @@ def test_worker_fractional_define_initial_contributions_apply_conversion_fee(mon
                     "reserves": [{"name": "SPORTS", "weight": 0.2, "initial_contribution": 0.1}],
                     "define_funding_amount": 200.001,
                     "create_reserves": False,
-                    "prepare_fractional_identity": False,
                     "identity_exists": True,
                 },
             },

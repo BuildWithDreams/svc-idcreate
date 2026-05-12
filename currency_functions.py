@@ -81,7 +81,6 @@ def enqueue_fractional_currency_request(
         "allocation_id": plan.allocation_id,
         "define_funding_amount": plan.define_funding_amount,
         "create_reserves": plan.create_reserves,
-        "prepare_fractional_identity": plan.prepare_fractional_identity,
         "identity_exists": plan.identity_exists,
     }
 
@@ -143,7 +142,6 @@ def currency_plan_template(mode: str = "auto") -> dict:
         "allocation_id": "blockoneminer@",
         "define_funding_amount": 200.001,
         "create_reserves": True,
-        "prepare_fractional_identity": True,
         "identity_exists": False,
     }
 
@@ -215,7 +213,6 @@ def create_fractional_currency(request, svc):
         allocation_id=request.allocation_id,
         define_funding_amount=request.define_funding_amount,
         create_reserves=request.create_reserves,
-        prepare_fractional_identity=request.prepare_fractional_identity,
         identity_exists=request.identity_exists,
     )
     return svc._enqueue_fractional_currency_request(

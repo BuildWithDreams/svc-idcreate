@@ -120,7 +120,6 @@ class CreateFractionalCurrencyRequest(BaseModel):
     allocation_id: str = Field(default="blockoneminer@", description="Identity used for reserve preallocations and reserve funding.")
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
-    prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
     identity_exists: bool = Field(
         default=False,
         description="If true, fractional VerusID already exists and fractional identity creation steps are skipped.",
@@ -157,7 +156,6 @@ class CurrencyFractionalPlan(BaseModel):
     allocation_id: str = Field(default="blockoneminer@", description="Identity used for reserve preallocations and reserve funding.")
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
-    prepare_fractional_identity: bool = Field(default=True, description="If true, run namecommitment/register/funding for fractional identity before definecurrency.")
     identity_exists: bool = Field(
         default=False,
         description="If true, fractional VerusID already exists and fractional identity creation steps are skipped.",

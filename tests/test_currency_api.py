@@ -74,7 +74,6 @@ def test_create_fractional_currency_request(monkeypatch, tmp_path):
             }
         ],
         "create_reserves": False,
-        "prepare_fractional_identity": False,
     }
     resp = client.post(
         "/api/currency/fractional",
@@ -91,7 +90,7 @@ def test_create_fractional_currency_request(monkeypatch, tmp_path):
     assert status_resp.status_code == 200
     status_body = status_resp.json()
     assert status_body["payload"]["create_reserves"] is False
-    assert status_body["payload"]["prepare_fractional_identity"] is False
+    assert status_body["payload"]["identity_exists"] is False
 
 
 def test_create_fractional_currency_request_allows_missing_supply_when_not_creating_reserves(monkeypatch, tmp_path):
@@ -130,7 +129,6 @@ def test_create_fractional_currency_request_allows_missing_supply_when_not_creat
         ],
         "define_funding_amount": 200.001,
         "create_reserves": False,
-        "prepare_fractional_identity": True,
     }
     resp = client.post(
         "/api/currency/fractional",
@@ -167,7 +165,6 @@ def test_create_fractional_currency_request_requires_supply_when_creating_reserv
         ],
         "define_funding_amount": 200.001,
         "create_reserves": True,
-        "prepare_fractional_identity": True,
     }
     resp = client.post(
         "/api/currency/fractional",
@@ -249,7 +246,6 @@ def test_plan_endpoint_explicit_fractional(monkeypatch, tmp_path):
                 },
                 "reserves": [],
                 "create_reserves": False,
-                "prepare_fractional_identity": False,
             },
         },
         headers={"X-API-Key": "test-key"},
@@ -262,7 +258,7 @@ def test_plan_endpoint_explicit_fractional(monkeypatch, tmp_path):
     status_resp = client.get(f"/api/currency/status/{body['request_id']}")
     assert status_resp.status_code == 200
     status_body = status_resp.json()
-    assert status_body["payload"]["prepare_fractional_identity"] is False
+    assert status_body["payload"]["identity_exists"] is False
 
 
 def test_plan_endpoint_fractional_allows_missing_supply_when_not_creating_reserves(monkeypatch, tmp_path):
@@ -305,7 +301,6 @@ def test_plan_endpoint_fractional_allows_missing_supply_when_not_creating_reserv
                 ],
                 "define_funding_amount": 200.001,
                 "create_reserves": False,
-                "prepare_fractional_identity": True,
             },
         },
         headers={"X-API-Key": "test-key"},
@@ -345,7 +340,6 @@ def test_plan_endpoint_parent_allowlist_is_case_insensitive(monkeypatch, tmp_pat
                 ],
                 "define_funding_amount": 200.001,
                 "create_reserves": False,
-                "prepare_fractional_identity": True,
                 "identity_exists": False,
             },
         },
@@ -418,7 +412,6 @@ def test_plan_endpoint_accepts_mixed_case_fractional_token_mode(monkeypatch, tmp
                 },
                 "reserves": [],
                 "create_reserves": False,
-                "prepare_fractional_identity": True,
                 "identity_exists": False,
             },
         },

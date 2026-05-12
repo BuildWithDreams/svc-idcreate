@@ -248,6 +248,78 @@ def _effective_contribution_amount(requested_amount: float, apply_conversion_fee
     return _normalize_amount(requested_amount * (1 - conversion_fee))
 
 
+def _compute_funding_shortfall(
+    rpc: Any,
+    *,
+    target_identity: str,
+    currency_name: str,
+    required_amount: float,
+    source_identity: str,
+    context_hint: str | None = None,
+) -> tuple[float, float]:
+    epsilon = _amount_epsilon()
+    required = _normalize_amount(required_amount)
+    current_target = _get_currency_balance_amount(rpc, target_identity, currency_name)
+    shortfall = _normalize_amount(required - current_target)
+
+    logger.info(
+        "currency.contribution.check currency=%s source=%s target=%s required=%s current_target=%s shortfall=%s context=%s",
+        currency_name,
+        source_identity,
+        target_identity,
+        required,
+        current_target,
+        shortfall,
+        context_hint,
+    )
+
+    if shortfall <= epsilon:
+        return required, 0.0
+
+    source_balance = _get_currency_balance_amount(rpc, source_identity, currency_name)
+    if source_balance + epsilon < shortfall:
+        exists = _currency_exists(rpc, currency_name)
+        logger.error(
+            "currency.contribution.insufficient currency=%s exists=%s source=%s source_balance=%s shortfall=%s target=%s context=%s",
+            currency_name,
+            exists,
+            source_identity,
+            source_balance,
+            shortfall,
+            target_identity,
+            context_hint,
+        )
+        raise Exception(
+            f"Insufficient source balance for {currency_name}: need {shortfall}, have {source_balance} at {source_identity}; "
+            f"currency_exists={exists}; target={target_identity}; context={context_hint}"
+        )
+
+    return required, shortfall
+
+
+def _submit_funding_transfers(rpc: Any, source_identity: str, params: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    if not params:
+        return []
+
+    logger.info(
+        "currency.rpc.send_currency.submit from=%s outputs=%s params=%s",
+        source_identity,
+        len(params),
+        _safe_log_json(params),
+    )
+
+    send_currency_fn = getattr(rpc, "send_currency", None)
+    if callable(send_currency_fn):
+        result = send_currency_fn(source_identity, params)
+        return [_extract_operation_or_txid(result)]
+
+    waits: list[tuple[str, str]] = []
+    for item in params:
+        result = rpc.send_currency_simple_to_identity(source_identity, item["currency"], item["address"], item["amount"])
+        waits.append(_extract_operation_or_txid(result))
+    return waits
+
+
 def _ensure_initial_contribution(
     rpc: Any,
     *,
@@ -725,25 +797,19 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
     step = row["step_index"]
     name = payload["name"]
     parent = payload["parent"]
-    prepare_fractional_identity = bool(payload.get("prepare_fractional_identity", True))
     fractional_identity_exists = bool(payload.get("identity_exists", False))
     create_reserves = bool(payload.get("create_reserves", True))
     logger.info(
-        "currency.fractional.step request_id=%s step=%s name=%s parent=%s create_reserves=%s prepare_fractional_identity=%s identity_exists=%s",
+        "currency.fractional.step request_id=%s step=%s name=%s parent=%s create_reserves=%s identity_exists=%s",
         row["id"],
         step,
         name,
         parent,
         create_reserves,
-        prepare_fractional_identity,
         fractional_identity_exists,
     )
 
     if step == 0:
-        if not prepare_fractional_identity:
-            _save_currency_state(conn, row["id"], status="in_progress", step_index=3, progress=progress)
-            return
-
         if fractional_identity_exists:
             _save_currency_state(conn, row["id"], status="in_progress", step_index=2, progress=progress)
             return
@@ -884,90 +950,100 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             wait_type, wait_value = wait
             pending_funding_waits.append({"wait_type": wait_type, "wait_value": wait_value})
 
-        # Submit all needed top-ups in one sweep (no per-transfer confirmation wait).
-        while True:
-            fund_index = int(progress.get("fund_index", 0))
+        # Step 4: plan all required top-ups first, then submit one sendcurrency call per source identity.
+        native_initial_required = _normalize_amount(float(native["initial_contribution"]))
+        define_funding_required = _normalize_amount(float(payload["define_funding_amount"]))
+        native_total_required = _normalize_amount(max(native_initial_required, define_funding_required))
+        contributions["native"] = native_initial_required
+        reserve_contributions = contributions.setdefault("reserves", {})
 
-            if not bool(progress.get("define_funding_checked", False)):
-                _, wait = _ensure_initial_contribution(
-                    rpc,
-                    target_identity=target_identity,
-                    currency_name=native["name"],
-                    requested_amount=float(payload["define_funding_amount"]),
-                    source_identity=payload["primary_raddress"],
-                    context_hint="fractional identity definecurrency funding",
-                    wait_for_confirmation=True,
-                    apply_conversion_fee=False,
-                )
-                progress["define_funding_checked"] = True
-                _record_pending_wait(wait)
-                continue
+        funding_plan: list[dict[str, Any]] = []
 
-            if fund_index == 0:
-                native_amount, wait = _ensure_initial_contribution(
-                    rpc,
-                    target_identity=target_identity,
-                    currency_name=native["name"],
-                    requested_amount=native["initial_contribution"],
-                    source_identity=payload["primary_raddress"],
-                    context_hint="native contribution before fractional definecurrency",
-                    wait_for_confirmation=True,
-                    apply_conversion_fee=False,
-                )
-                contributions["native"] = native_amount
-                progress["funded_initial_contributions"] = contributions
-                _record_pending_wait(wait)
-                progress["fund_index"] = 1
-                continue
+        _, native_shortfall = _compute_funding_shortfall(
+            rpc,
+            target_identity=target_identity,
+            currency_name=native["name"],
+            required_amount=native_total_required,
+            source_identity=payload["primary_raddress"],
+            context_hint="fractional identity native funding (define + initial)",
+        )
+        if native_shortfall > _amount_epsilon():
+            funding_plan.append(
+                {
+                    "source": payload["primary_raddress"],
+                    "currency": native["name"],
+                    "address": target_identity,
+                    "amount": native_shortfall,
+                }
+            )
 
-            reserve_pos = fund_index - 1
-            if reserve_pos < len(reserves):
-                reserve = reserves[reserve_pos]
-                reserve_source_identity = payload["allocation_id"] if create_reserves else payload["primary_raddress"]
-                reserve_name = reserve["name"]
-                reserve_exists = _currency_exists(rpc, reserve_name)
-                logger.info(
-                    "currency.fractional.reserve.precheck request_id=%s reserve=%s reserve_exists=%s create_reserves=%s source_identity=%s target_identity=%s requested=%s",
+        for reserve in reserves:
+            reserve_name = reserve["name"]
+            reserve_required = _normalize_amount(float(reserve["initial_contribution"]))
+            reserve_contributions[reserve_name] = reserve_required
+            reserve_source_identity = payload["allocation_id"] if create_reserves else payload["primary_raddress"]
+
+            reserve_exists = _currency_exists(rpc, reserve_name)
+            logger.info(
+                "currency.fractional.reserve.precheck request_id=%s reserve=%s reserve_exists=%s create_reserves=%s source_identity=%s target_identity=%s requested=%s",
+                row["id"],
+                reserve_name,
+                reserve_exists,
+                create_reserves,
+                reserve_source_identity,
+                target_identity,
+                reserve_required,
+            )
+            if not reserve_exists:
+                mode_hint = "create_reserves=true expected prior reserve definecurrency step" if create_reserves else "create_reserves=false expects reserve currency to already exist"
+                logger.error(
+                    "currency.fractional.reserve.missing request_id=%s reserve=%s mode_hint=%s",
                     row["id"],
                     reserve_name,
-                    reserve_exists,
-                    create_reserves,
-                    reserve_source_identity,
-                    target_identity,
-                    reserve["initial_contribution"],
+                    mode_hint,
                 )
-                if not reserve_exists:
-                    mode_hint = "create_reserves=true expected prior reserve definecurrency step" if create_reserves else "create_reserves=false expects reserve currency to already exist"
-                    logger.error(
-                        "currency.fractional.reserve.missing request_id=%s reserve=%s mode_hint=%s",
-                        row["id"],
-                        reserve_name,
-                        mode_hint,
-                    )
-                    raise Exception(f"Reserve currency {reserve_name} not found; {mode_hint}")
-                reserve_amount, wait = _ensure_initial_contribution(
-                    rpc,
-                    target_identity=target_identity,
-                    currency_name=reserve_name,
-                    requested_amount=reserve["initial_contribution"],
-                    source_identity=reserve_source_identity,
-                    context_hint=(
-                        "reserve contribution after reserve creation"
-                        if create_reserves
-                        else "reserve contribution with pre-existing reserve currency"
-                    ),
-                    wait_for_confirmation=True,
-                    apply_conversion_fee=False,
-                )
-                reserve_effective = contributions.setdefault("reserves", {})
-                reserve_effective[reserve_name] = reserve_amount
-                progress["funded_initial_contributions"] = contributions
-                _record_pending_wait(wait)
-                progress["fund_index"] = fund_index + 1
-                continue
+                raise Exception(f"Reserve currency {reserve_name} not found; {mode_hint}")
 
-            _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
-            return
+            _, reserve_shortfall = _compute_funding_shortfall(
+                rpc,
+                target_identity=target_identity,
+                currency_name=reserve_name,
+                required_amount=reserve_required,
+                source_identity=reserve_source_identity,
+                context_hint=(
+                    "reserve contribution after reserve creation"
+                    if create_reserves
+                    else "reserve contribution with pre-existing reserve currency"
+                ),
+            )
+            if reserve_shortfall > _amount_epsilon():
+                funding_plan.append(
+                    {
+                        "source": reserve_source_identity,
+                        "currency": reserve_name,
+                        "address": target_identity,
+                        "amount": reserve_shortfall,
+                    }
+                )
+
+        params_by_source: dict[str, list[dict[str, Any]]] = {}
+        for item in funding_plan:
+            params_by_source.setdefault(item["source"], []).append(
+                {
+                    "currency": item["currency"],
+                    "address": item["address"],
+                    "amount": item["amount"],
+                }
+            )
+
+        for source_identity, params in params_by_source.items():
+            waits = _submit_funding_transfers(rpc, source_identity, params)
+            for wait in waits:
+                _record_pending_wait(wait)
+
+        progress["funded_initial_contributions"] = contributions
+        _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
+        return
 
     if step == 5:
         native = payload["native"]

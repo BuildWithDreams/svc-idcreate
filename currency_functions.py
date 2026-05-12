@@ -74,6 +74,7 @@ def enqueue_fractional_currency_request(
         "primary_raddress": primary_raddress,
         "initial_supply": plan.initial_supply,
         "id_registration_fees": plan.id_registration_fees,
+        "id_import_fees": plan.id_import_fees,
         "id_referral_levels": plan.id_referral_levels,
         "start_block": plan.start_block,
         "native": plan.native.model_dump(),
@@ -206,6 +207,7 @@ def create_fractional_currency(request, svc):
     fractional_plan = svc.CurrencyFractionalPlan(
         initial_supply=request.initial_supply,
         id_registration_fees=request.id_registration_fees,
+        id_import_fees=request.id_import_fees,
         id_referral_levels=request.id_referral_levels,
         start_block=request.start_block,
         native=request.native,

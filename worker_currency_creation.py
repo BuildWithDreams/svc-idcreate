@@ -1365,6 +1365,8 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             "initialcontributions": initial_contributions,
             "initialsupply": payload["initial_supply"],
         }
+        if payload.get("id_import_fees") is not None:
+            options["idimportfees"] = payload["id_import_fees"]
 
         logger.info(
             "currency.rpc.define_currency.submit request_id=%s params=%s",

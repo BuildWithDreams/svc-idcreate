@@ -237,6 +237,7 @@ def test_plan_endpoint_explicit_fractional(monkeypatch, tmp_path):
             "fractional": {
                 "initial_supply": 100000,
                 "id_registration_fees": 50,
+                "idimportfees": 0.01,
                 "id_referral_levels": 0,
                 "start_block": 28000,
                 "native": {
@@ -259,6 +260,7 @@ def test_plan_endpoint_explicit_fractional(monkeypatch, tmp_path):
     assert status_resp.status_code == 200
     status_body = status_resp.json()
     assert status_body["payload"]["identity_exists"] is False
+    assert status_body["payload"]["id_import_fees"] == 0.01
 
 
 def test_plan_endpoint_fractional_allows_missing_supply_when_not_creating_reserves(monkeypatch, tmp_path):

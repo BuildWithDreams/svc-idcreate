@@ -6,7 +6,7 @@ from fastapi import Security
 from fastapi import status
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from contextlib import asynccontextmanager
 import os
 import json
@@ -113,6 +113,11 @@ class CreateFractionalCurrencyRequest(BaseModel):
     primary_raddress: str = Field(description="Primary R-address for identity control.", examples=["RaliceAddress"])
     initial_supply: float = Field(description="Initial fractional supply.", examples=[100000])
     id_registration_fees: float = Field(default=50, description="ID registration fees for definecurrency payload.")
+    id_import_fees: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("id_import_fees", "idimportfees"),
+        description="Optional ID import fees for definecurrency payload.",
+    )
     id_referral_levels: int = Field(default=0, description="ID referral levels for definecurrency payload.")
     start_block: int = Field(description="Start block for fractional currency launch.", examples=[28000])
     native: FractionalNativeContribution = Field(description="Native reserve contribution details.")
@@ -149,6 +154,11 @@ class CurrencySimplePlan(BaseModel):
 class CurrencyFractionalPlan(BaseModel):
     initial_supply: float = Field(description="Initial fractional supply.", examples=[100000])
     id_registration_fees: float = Field(default=50, description="ID registration fees for definecurrency payload.")
+    id_import_fees: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("id_import_fees", "idimportfees"),
+        description="Optional ID import fees for definecurrency payload.",
+    )
     id_referral_levels: int = Field(default=0, description="ID referral levels for definecurrency payload.")
     start_block: int = Field(description="Start block for fractional currency launch.", examples=[28000])
     native: FractionalNativeContribution = Field(description="Native reserve contribution details.")

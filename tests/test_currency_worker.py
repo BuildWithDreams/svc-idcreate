@@ -1039,6 +1039,7 @@ def test_worker_fractional_define_initial_contributions_apply_conversion_fee(mon
                 "fractional": {
                     "initial_supply": 325000,
                     "id_registration_fees": 777,
+                    "idimportfees": 0.01,
                     "id_referral_levels": 3,
                     "start_block": 1057000,
                     "native": {
@@ -1088,6 +1089,7 @@ def test_worker_fractional_define_initial_contributions_apply_conversion_fee(mon
 
     assert initial_contributions[0] == pytest.approx(expected_native, rel=0, abs=1e-8)
     assert initial_contributions[1] == pytest.approx(expected_reserve, rel=0, abs=1e-8)
+    assert fake_rpc.last_define_options["idimportfees"] == pytest.approx(0.01, rel=0, abs=1e-12)
 
 
 def test_worker_fractional_native_shortfall_uses_define_plus_initial(monkeypatch, tmp_path):

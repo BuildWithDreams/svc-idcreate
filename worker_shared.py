@@ -1,6 +1,46 @@
 from typing import Any
 
 
+def get_operation_status_snapshot(rpc: Any, opid: str) -> dict[str, Any]:
+    statuses = rpc.z_get_operation_status(opid)
+    snapshot: dict[str, Any] = {
+        "opid": opid,
+        "entries": 0,
+        "status": None,
+        "has_result": False,
+        "txid": None,
+        "error": None,
+    }
+
+    if not isinstance(statuses, list) or not statuses:
+        return snapshot
+
+    snapshot["entries"] = len(statuses)
+    first = statuses[0]
+    if not isinstance(first, dict):
+        return snapshot
+
+    status = first.get("status")
+    if isinstance(status, str):
+        snapshot["status"] = status
+
+    result = first.get("result")
+    if isinstance(result, dict):
+        snapshot["has_result"] = True
+        txid = result.get("txid")
+        if isinstance(txid, str) and txid:
+            snapshot["txid"] = txid
+
+    error = first.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        snapshot["error"] = message if isinstance(message, str) else str(error)
+    elif isinstance(error, str):
+        snapshot["error"] = error
+
+    return snapshot
+
+
 def get_tx_confirmations(rpc: Any, txid: str) -> int:
     tx = rpc.get_raw_transaction(txid)
     if isinstance(tx, dict):
@@ -9,18 +49,9 @@ def get_tx_confirmations(rpc: Any, txid: str) -> int:
 
 
 def poll_operation_for_txid(rpc: Any, opid: str) -> str | None:
-    statuses = rpc.z_get_operation_status(opid)
-    if not isinstance(statuses, list) or not statuses:
-        return None
-
-    first = statuses[0]
-    if not isinstance(first, dict):
-        return None
-
-    result = first.get("result")
-    if isinstance(result, dict) and isinstance(result.get("txid"), str):
-        return result["txid"]
-    return None
+    snapshot = get_operation_status_snapshot(rpc, opid)
+    txid = snapshot.get("txid")
+    return txid if isinstance(txid, str) and txid else None
 
 
 def resolve_wait_progress(rpc: Any, wait_type: str, wait_value: str) -> tuple[bool, str, str]:
@@ -37,7 +68,8 @@ def resolve_wait_progress(rpc: Any, wait_type: str, wait_value: str) -> tuple[bo
         return False, "tx_confirm", wait_value
 
     if wait_type == "opid_txid":
-        txid = poll_operation_for_txid(rpc, wait_value)
+        snapshot = get_operation_status_snapshot(rpc, wait_value)
+        txid = snapshot.get("txid")
         if txid:
             return True, "tx_confirm", txid
         return False, "opid_txid", wait_value

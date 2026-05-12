@@ -6,10 +6,30 @@ import sqlite3
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable
 
-from worker_shared import get_tx_confirmations, poll_operation_for_txid, resolve_wait_progress
+from worker_shared import get_operation_status_snapshot, get_tx_confirmations
 
 
 logger = logging.getLogger(__name__)
+
+
+class PermanentCurrencyError(Exception):
+    """A non-retryable currency workflow failure."""
+
+
+def _opid_wait_state(op_snapshot: dict[str, Any], *, opid: str, context: str) -> tuple[str, str | None]:
+    txid = op_snapshot.get("txid")
+    if isinstance(txid, str) and txid:
+        return "resolved", txid
+
+    status = op_snapshot.get("status")
+    if status in {"executing", "queued"}:
+        return "waiting", None
+
+    error_text = op_snapshot.get("error")
+    raise PermanentCurrencyError(
+        f"Operation {opid} is terminal without txid in {context}: "
+        f"status={status} has_result={op_snapshot.get('has_result')} error={error_text}"
+    )
 
 
 def _safe_log_json(data: Any, max_len: int = 6000) -> str:
@@ -157,8 +177,9 @@ def _prefer_txid_wait(rpc: Any, wait_type: str, wait_value: str, *, log_context:
     if wait_type != "opid_txid":
         return wait_type, wait_value
 
-    resolved, next_wait_type, next_wait_value = resolve_wait_progress(rpc, wait_type, wait_value)
-    if resolved and next_wait_type == "tx_confirm" and next_wait_value:
+    op_snapshot = get_operation_status_snapshot(rpc, wait_value)
+    op_state, next_wait_value = _opid_wait_state(op_snapshot, opid=wait_value, context=log_context)
+    if op_state == "resolved" and next_wait_value:
         logger.info(
             "currency.wait.opid_resolved context=%s opid=%s txid=%s",
             log_context,
@@ -167,7 +188,15 @@ def _prefer_txid_wait(rpc: Any, wait_type: str, wait_value: str, *, log_context:
         )
         return "tx_confirm", next_wait_value
 
-    logger.info("currency.wait.opid_pending context=%s opid=%s", log_context, wait_value)
+    logger.info(
+        "currency.wait.opid_pending context=%s opid=%s status=%s has_result=%s txid=%s error=%s",
+        log_context,
+        wait_value,
+        op_snapshot.get("status"),
+        op_snapshot.get("has_result"),
+        op_snapshot.get("txid"),
+        op_snapshot.get("error"),
+    )
     return wait_type, wait_value
 
 
@@ -982,8 +1011,22 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                     continue
 
                 if wait_type == "opid_txid":
-                    txid = poll_operation_for_txid(rpc, wait_value)
-                    if not txid:
+                    op_snapshot = get_operation_status_snapshot(rpc, wait_value)
+                    logger.info(
+                        "currency.fractional.step4.funding_wait_poll request_id=%s opid=%s status=%s has_result=%s txid=%s error=%s",
+                        row["id"],
+                        wait_value,
+                        op_snapshot.get("status"),
+                        op_snapshot.get("has_result"),
+                        op_snapshot.get("txid"),
+                        op_snapshot.get("error"),
+                    )
+                    op_state, txid = _opid_wait_state(
+                        op_snapshot,
+                        opid=wait_value,
+                        context=f"fractional step4 funding wait request_id={row['id']}",
+                    )
+                    if op_state == "waiting":
                         unresolved_waits.append({"wait_type": "opid_txid", "wait_value": wait_value})
                     else:
                         logger.info(
@@ -1173,8 +1216,22 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 continue
 
             if wait_type == "opid_txid":
-                txid = poll_operation_for_txid(rpc, wait_value)
-                if not txid:
+                op_snapshot = get_operation_status_snapshot(rpc, wait_value)
+                logger.info(
+                    "currency.fractional.define.funding_wait_poll request_id=%s opid=%s status=%s has_result=%s txid=%s error=%s",
+                    row["id"],
+                    wait_value,
+                    op_snapshot.get("status"),
+                    op_snapshot.get("has_result"),
+                    op_snapshot.get("txid"),
+                    op_snapshot.get("error"),
+                )
+                op_state, txid = _opid_wait_state(
+                    op_snapshot,
+                    opid=wait_value,
+                    context=f"fractional step5 define wait request_id={row['id']}",
+                )
+                if op_state == "waiting":
                     unresolved_waits.append({"wait_type": "opid_txid", "wait_value": wait_value})
                 else:
                     logger.info(
@@ -1360,14 +1417,25 @@ def process_currency_once(
                 if not opid:
                     raise Exception("Missing operation id while in waiting_opid state")
 
-                resolved, next_wait_type, next_wait_value = resolve_wait_progress(rpc, "opid_txid", opid)
+                op_snapshot = get_operation_status_snapshot(rpc, opid)
+                op_state, next_wait_value = _opid_wait_state(
+                    op_snapshot,
+                    opid=opid,
+                    context=f"currency request_id={row['id']} waiting_opid",
+                )
+                resolved = op_state == "resolved"
+                next_wait_type = "tx_confirm" if resolved else "opid_txid"
                 logger.info(
-                    "currency.process.waiting_opid request_id=%s opid=%s resolved=%s next_wait_type=%s next_wait_value=%s",
+                    "currency.process.waiting_opid request_id=%s opid=%s resolved=%s next_wait_type=%s next_wait_value=%s status=%s has_result=%s txid=%s error=%s",
                     row["id"],
                     opid,
                     resolved,
                     next_wait_type,
                     next_wait_value,
+                    op_snapshot.get("status"),
+                    op_snapshot.get("has_result"),
+                    op_snapshot.get("txid"),
+                    op_snapshot.get("error"),
                 )
                 if resolved and next_wait_type == "tx_confirm":
                     logger.info(
@@ -1425,13 +1493,27 @@ def process_currency_once(
                 _safe_log_json(_parse_json_or_empty(row["payload_json"])),
                 _safe_log_json(_parse_json_or_empty(row["progress_json"])),
             )
-            _record_currency_retry_or_failure(
-                conn,
-                row["id"],
-                row["attempts"],
-                str(exc),
-                row_status if row_status in {"pending", "in_progress", "waiting_confirm", "waiting_opid"} else "in_progress",
-            )
+            if isinstance(exc, PermanentCurrencyError):
+                conn.execute(
+                    """
+                    UPDATE currency_requests
+                    SET status = 'failed',
+                        attempts = ?,
+                        error_message = ?,
+                        next_retry_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (row["attempts"] + 1, str(exc), row["id"]),
+                )
+            else:
+                _record_currency_retry_or_failure(
+                    conn,
+                    row["id"],
+                    row["attempts"],
+                    str(exc),
+                    row_status if row_status in {"pending", "in_progress", "waiting_confirm", "waiting_opid"} else "in_progress",
+                )
             updated_count += 1
 
     conn.commit()

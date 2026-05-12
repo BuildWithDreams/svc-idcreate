@@ -3,6 +3,8 @@ import os
 import sqlite3
 from typing import Any, Callable
 
+from worker_shared import get_tx_confirmations
+
 
 def process_identity_once(
     *,
@@ -92,16 +94,12 @@ def process_identity_once(
         )
         try:
             rpc = get_rpc_connection(row["daemon_name"])
-            tx = rpc.get_raw_transaction(row["rnc_txid"])
-            confirmations = 0
-            if isinstance(tx, dict):
-                confirmations = tx.get("confirmations", 0)
+            confirmations = get_tx_confirmations(rpc, row["rnc_txid"])
             logger.debug(
-                "worker.process_once.pending_rnc_confirm.rpc_response request_id=%s rnc_txid=%s confirmations=%s tx=%s",
+                "worker.process_once.pending_rnc_confirm.rpc_response request_id=%s rnc_txid=%s confirmations=%s",
                 row["id"],
                 row["rnc_txid"],
                 confirmations,
-                log_json(tx),
             )
         except Exception as exc:
             logger.exception(
@@ -192,16 +190,12 @@ def process_identity_once(
         )
         try:
             rpc = get_rpc_connection(row["daemon_name"])
-            tx = rpc.get_raw_transaction(row["idr_txid"])
-            confirmations = 0
-            if isinstance(tx, dict):
-                confirmations = tx.get("confirmations", 0)
+            confirmations = get_tx_confirmations(rpc, row["idr_txid"])
             logger.debug(
-                "worker.process_once.idr_submitted.rpc_response request_id=%s idr_txid=%s confirmations=%s tx=%s",
+                "worker.process_once.idr_submitted.rpc_response request_id=%s idr_txid=%s confirmations=%s",
                 row["id"],
                 row["idr_txid"],
                 confirmations,
-                log_json(tx),
             )
         except Exception as exc:
             logger.exception(

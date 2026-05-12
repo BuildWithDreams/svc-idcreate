@@ -6,6 +6,8 @@ import sqlite3
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable
 
+from worker_shared import get_tx_confirmations, poll_operation_for_txid, resolve_wait_progress
+
 
 logger = logging.getLogger(__name__)
 
@@ -186,21 +188,6 @@ def _save_currency_state(
             row_id,
         ),
     )
-
-
-def _poll_operation_for_txid(rpc: Any, opid: str) -> str | None:
-    statuses = rpc.z_get_operation_status(opid)
-    if not isinstance(statuses, list) or not statuses:
-        return None
-
-    first = statuses[0]
-    if not isinstance(first, dict):
-        return None
-
-    result = first.get("result")
-    if isinstance(result, dict) and isinstance(result.get("txid"), str):
-        return result["txid"]
-    return None
 
 
 def _get_currency_balance_amount(rpc: Any, holder: str, currency: str) -> float:
@@ -510,32 +497,18 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
 
     if step == 2:
         logger.info(
-            "currency.rpc.send_currency_simple_to_identity.submit request_id=%s params=%s",
+            "currency.fractional.step2.skip_direct_funding request_id=%s reason=%s",
             row["id"],
-            _safe_log_json(
-                {
-                    "from_address": payload["primary_raddress"],
-                    "currency": payload["native_coin"],
-                    "identity": f"{name}@",
-                    "amount": payload["define_funding_amount"],
-                }
-            ),
+            "defer native+reserve funding to step4 after balance checks and batched sendcurrency planning",
         )
-        result = rpc.send_currency_simple_to_identity(
-            payload["primary_raddress"],
-            payload["native_coin"],
-            f"{name}@",
-            payload["define_funding_amount"],
-        )
-        wait_type, wait_value = _extract_operation_or_txid(result)
         _save_currency_state(
             conn,
             row["id"],
-            status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
+            status="in_progress",
             step_index=3,
             progress=progress,
-            wait_type=wait_type,
-            wait_value=wait_value,
+            wait_type=None,
+            wait_value=None,
         )
         return
 
@@ -1036,6 +1009,16 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 }
             )
 
+        if not funding_plan:
+            logger.info(
+                "currency.fractional.funding_plan_noop request_id=%s target_identity=%s reason=%s native_required=%s reserves=%s",
+                row["id"],
+                target_identity,
+                "all required native and reserve contributions already funded",
+                native_total_required,
+                len(reserves),
+            )
+
         funding_plan_summary = []
         for source_identity, params in params_by_source.items():
             total_amount = _normalize_amount(sum(float(item.get("amount", 0.0)) for item in params))
@@ -1088,14 +1071,13 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 continue
 
             if wait_type == "tx_confirm":
-                tx = rpc.get_raw_transaction(wait_value)
-                confirmations = tx.get("confirmations", 0) if isinstance(tx, dict) else 0
+                confirmations = get_tx_confirmations(rpc, wait_value)
                 if confirmations <= 0:
                     unresolved_waits.append({"wait_type": "tx_confirm", "wait_value": wait_value})
                 continue
 
             if wait_type == "opid_txid":
-                txid = _poll_operation_for_txid(rpc, wait_value)
+                txid = poll_operation_for_txid(rpc, wait_value)
                 if not txid:
                     unresolved_waits.append({"wait_type": "opid_txid", "wait_value": wait_value})
                 else:
@@ -1233,8 +1215,7 @@ def process_currency_once(
                 if not txid:
                     raise Exception("Missing wait txid while in waiting_confirm state")
 
-                tx = rpc.get_raw_transaction(txid)
-                confirmations = tx.get("confirmations", 0) if isinstance(tx, dict) else 0
+                confirmations = get_tx_confirmations(rpc, txid)
                 logger.info(
                     "currency.process.waiting_confirm request_id=%s txid=%s confirmations=%s",
                     row["id"],
@@ -1259,14 +1240,16 @@ def process_currency_once(
                 if not opid:
                     raise Exception("Missing operation id while in waiting_opid state")
 
-                txid = _poll_operation_for_txid(rpc, opid)
+                resolved, next_wait_type, next_wait_value = resolve_wait_progress(rpc, "opid_txid", opid)
                 logger.info(
-                    "currency.process.waiting_opid request_id=%s opid=%s resolved_txid=%s",
+                    "currency.process.waiting_opid request_id=%s opid=%s resolved=%s next_wait_type=%s next_wait_value=%s",
                     row["id"],
                     opid,
-                    txid,
+                    resolved,
+                    next_wait_type,
+                    next_wait_value,
                 )
-                if txid:
+                if resolved and next_wait_type == "tx_confirm":
                     _save_currency_state(
                         conn,
                         row["id"],
@@ -1274,7 +1257,7 @@ def process_currency_once(
                         step_index=row["step_index"],
                         progress=_parse_json_or_empty(row["progress_json"]),
                         wait_type="tx_confirm",
-                        wait_value=txid,
+                        wait_value=next_wait_value,
                     )
                     updated_count += 1
                 continue

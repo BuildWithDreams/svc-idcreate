@@ -1148,6 +1148,75 @@ def test_worker_fractional_native_shortfall_uses_define_plus_initial(monkeypatch
     assert native_calls[0][3] == pytest.approx(0.4, rel=0, abs=1e-8)
 
 
+def test_worker_fractional_source_wallet_shortfall_partially_funds_and_stays_step4(monkeypatch, tmp_path):
+    db_path = tmp_path / "registrar.db"
+    monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
+    monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
+    monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+
+    with TestClient(id_create_service.app) as client:
+        resp = client.post(
+            "/api/currency/plan",
+            json={
+                "name": "DPNK",
+                "parent": "VRSCTEST",
+                "native_coin": "VRSCTEST",
+                "primary_raddress": "RtestAddress",
+                "mode": "fractional",
+                "fractional": {
+                    "initial_supply": 325000,
+                    "id_registration_fees": 777,
+                    "id_referral_levels": 3,
+                    "start_block": 1057000,
+                    "native": {
+                        "name": "VRSCTEST",
+                        "weight": 1.0,
+                        "initial_contribution": 0.5,
+                    },
+                    "reserves": [],
+                    "define_funding_amount": 200.001,
+                    "create_reserves": False,
+                    "identity_exists": True,
+                },
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+
+    assert resp.status_code == 202
+    request_id = resp.json()["request_id"]
+
+    fake_rpc = _FakeFractionalContributionSweepRpc()
+    fake_rpc.balances.setdefault("RtestAddress", {})["VRSCTEST"] = 99.4339
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
+
+    # pending->step0, step2->step3, step3->step4, step4 funding plan/send
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+    worker.process_once()
+
+    # Sends available amount now, does not fail, and stays in step4 awaiting top-up.
+    assert len(fake_rpc.batch_sent_calls) == 1
+    sent_outputs = fake_rpc.batch_sent_calls[0][1]
+    assert len(sent_outputs) == 1
+    assert sent_outputs[0]["currency"] == "VRSCTEST"
+    assert sent_outputs[0]["amount"] == pytest.approx(99.4339, rel=0, abs=1e-8)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT status, step_index, attempts FROM currency_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["status"] == "in_progress"
+    assert row["step_index"] == 4
+    assert row["attempts"] == 0
+
+
 def test_worker_fractional_step4_does_not_resubmit_while_pending_waits_unresolved(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))

@@ -290,7 +290,7 @@ def _compute_funding_shortfall(
     required_amount: float,
     source_identity: str,
     context_hint: str | None = None,
-) -> tuple[float, float]:
+) -> tuple[float, float, float, bool]:
     epsilon = _amount_epsilon()
     required = _normalize_amount(required_amount)
     current_target = _get_currency_balance_amount(rpc, target_identity, currency_name)
@@ -308,27 +308,27 @@ def _compute_funding_shortfall(
     )
 
     if shortfall <= epsilon:
-        return required, 0.0
+        return required, 0.0, 0.0, False
 
     source_balance = _get_currency_balance_amount(rpc, source_identity, currency_name)
-    if source_balance + epsilon < shortfall:
+    source_balance_non_negative = 0.0 if source_balance < 0 else source_balance
+    affordable_amount = _normalize_amount(min(shortfall, source_balance_non_negative))
+    source_insufficient = source_balance + epsilon < shortfall
+    if source_insufficient:
         exists = _currency_exists(rpc, currency_name)
-        logger.error(
-            "currency.contribution.insufficient currency=%s exists=%s source=%s source_balance=%s shortfall=%s target=%s context=%s",
+        logger.warning(
+            "currency.contribution.source_shortfall currency=%s exists=%s source=%s source_balance=%s shortfall=%s affordable_now=%s target=%s context=%s",
             currency_name,
             exists,
             source_identity,
             source_balance,
             shortfall,
+            affordable_amount,
             target_identity,
             context_hint,
         )
-        raise Exception(
-            f"Insufficient source balance for {currency_name}: need {shortfall}, have {source_balance} at {source_identity}; "
-            f"currency_exists={exists}; target={target_identity}; context={context_hint}"
-        )
 
-    return required, shortfall
+    return required, shortfall, affordable_amount, source_insufficient
 
 
 def _submit_funding_transfers(rpc: Any, source_identity: str, params: list[dict[str, Any]]) -> list[tuple[str, str]]:
@@ -1071,7 +1071,9 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
 
         funding_plan: list[dict[str, Any]] = []
 
-        _, native_shortfall = _compute_funding_shortfall(
+        source_shortfalls: list[dict[str, Any]] = []
+
+        _, native_shortfall, native_affordable, native_source_insufficient = _compute_funding_shortfall(
             rpc,
             target_identity=target_identity,
             currency_name=native["name"],
@@ -1079,13 +1081,22 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             source_identity=payload["primary_raddress"],
             context_hint="fractional identity native funding (define + initial)",
         )
-        if native_shortfall > _amount_epsilon():
+        if native_source_insufficient:
+            source_shortfalls.append(
+                {
+                    "currency": native["name"],
+                    "source": payload["primary_raddress"],
+                    "shortfall": native_shortfall,
+                    "affordable_now": native_affordable,
+                }
+            )
+        if native_affordable > _amount_epsilon():
             funding_plan.append(
                 {
                     "source": payload["primary_raddress"],
                     "currency": native["name"],
                     "address": target_identity,
-                    "amount": native_shortfall,
+                    "amount": native_affordable,
                 }
             )
 
@@ -1116,7 +1127,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 )
                 raise Exception(f"Reserve currency {reserve_name} not found; {mode_hint}")
 
-            _, reserve_shortfall = _compute_funding_shortfall(
+            _, reserve_shortfall, reserve_affordable, reserve_source_insufficient = _compute_funding_shortfall(
                 rpc,
                 target_identity=target_identity,
                 currency_name=reserve_name,
@@ -1128,13 +1139,22 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                     else "reserve contribution with pre-existing reserve currency"
                 ),
             )
-            if reserve_shortfall > _amount_epsilon():
+            if reserve_source_insufficient:
+                source_shortfalls.append(
+                    {
+                        "currency": reserve_name,
+                        "source": reserve_source_identity,
+                        "shortfall": reserve_shortfall,
+                        "affordable_now": reserve_affordable,
+                    }
+                )
+            if reserve_affordable > _amount_epsilon():
                 funding_plan.append(
                     {
                         "source": reserve_source_identity,
                         "currency": reserve_name,
                         "address": target_identity,
-                        "amount": reserve_shortfall,
+                        "amount": reserve_affordable,
                     }
                 )
 
@@ -1148,7 +1168,7 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 }
             )
 
-        if not funding_plan:
+        if not funding_plan and not source_shortfalls:
             logger.info(
                 "currency.fractional.funding_plan_noop request_id=%s target_identity=%s reason=%s native_required=%s reserves=%s",
                 row["id"],
@@ -1156,6 +1176,14 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 "all required native and reserve contributions already funded",
                 native_total_required,
                 len(reserves),
+            )
+        elif not funding_plan and source_shortfalls:
+            logger.info(
+                "currency.fractional.funding_plan_blocked request_id=%s target_identity=%s reason=%s deficits=%s",
+                row["id"],
+                target_identity,
+                "source identities have no spendable balance for one or more required currencies",
+                _safe_log_json(source_shortfalls),
             )
 
         funding_plan_summary = []
@@ -1186,6 +1214,15 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
                 _record_pending_wait(wait)
 
         progress["funded_initial_contributions"] = contributions
+        if source_shortfalls:
+            logger.info(
+                "currency.fractional.funding_source_shortfall request_id=%s target_identity=%s deficits=%s",
+                row["id"],
+                target_identity,
+                _safe_log_json(source_shortfalls),
+            )
+            _save_currency_state(conn, row["id"], status="in_progress", step_index=4, progress=progress)
+            return
         _save_currency_state(conn, row["id"], status="in_progress", step_index=5, progress=progress)
         return
 

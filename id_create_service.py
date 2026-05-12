@@ -1340,15 +1340,6 @@ def register_form():
 
 @app.get("/currency/plan", response_class=HTMLResponse, summary="Reference web form for unified currency plan submission")
 def currency_plan_form():
-        allowed_parents = sorted(_allowed_parent_namespaces())
-        parent_options = "\n".join(f'<option value="{parent}">{parent}</option>' for parent in allowed_parents)
-
-        parent_input = (
-                f'<select id="parent" name="parent" required>{parent_options}</select>'
-                if allowed_parents
-                else '<input id="parent" name="parent" value="bitcoins.vrsc" required />'
-        )
-
         html = f"""
 <!doctype html>
 <html lang="en">
@@ -1438,14 +1429,10 @@ def currency_plan_form():
         <div class="shell">
             <div class="mast">
                 <h1>Currency Plan Console</h1>
-                <div class="meta">Reference UI for POST /api/currency/plan and GET /api/currency/status/&lt;request_id&gt;.</div>
+                <div class="meta">Reference UI for POST /api/currency/plan and GET /api/currency/status/&lt;request_id&gt;. Edit all request fields in Plan JSON; only that JSON is submitted.</div>
             </div>
             <form id="currency-plan-form">
-                <label>Name<input id="name" name="name" value="SIXTH" required /></label>
-                <label>Parent{parent_input}</label>
-                <label>Native Coin<input id="native_coin" name="native_coin" value="VRSC" required /></label>
-                <label>Primary R-Address<input id="primary_raddress" name="primary_raddress" placeholder="R..." required /></label>
-                <label>Mode
+                <label>Template Mode
                     <select id="mode" name="mode">
                         <option value="auto">auto</option>
                         <option value="simple_token">simple_token</option>
@@ -1469,11 +1456,6 @@ def currency_plan_form():
                 const response = await fetch(`/api/currency/plan/template?mode=${{encodeURIComponent(mode)}}`);
                 const data = await response.json();
                 const template = data.template || {{}};
-                template.name = document.getElementById('name').value.trim() || template.name || 'SIXTH';
-                template.parent = document.getElementById('parent').value.trim() || template.parent || 'bitcoins.vrsc';
-                template.native_coin = document.getElementById('native_coin').value.trim() || template.native_coin || 'VRSC';
-                template.primary_raddress = document.getElementById('primary_raddress').value.trim() || template.primary_raddress || 'R...';
-                template.mode = mode;
                 document.getElementById('plan_json').value = JSON.stringify(template, null, 2);
                 document.getElementById('result').textContent = 'Template loaded.';
             }}
@@ -1504,11 +1486,17 @@ def currency_plan_form():
                     return;
                 }}
 
-                payload.name = document.getElementById('name').value.trim();
-                payload.parent = document.getElementById('parent').value.trim();
-                payload.native_coin = document.getElementById('native_coin').value.trim();
-                payload.primary_raddress = document.getElementById('primary_raddress').value.trim();
-                payload.mode = document.getElementById('mode').value;
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {{
+                    document.getElementById('result').textContent = 'Invalid JSON: top-level payload must be an object.';
+                    return;
+                }}
+
+                const requiredFields = ['name', 'parent', 'native_coin', 'primary_raddress'];
+                const missing = requiredFields.filter((field) => !String(payload[field] ?? '').trim());
+                if (missing.length > 0) {{
+                    document.getElementById('result').textContent = `Invalid JSON: missing required fields: ${{missing.join(', ')}}`;
+                    return;
+                }}
 
                 const res = await fetch('/api/currency/plan', {{
                     method: 'POST',

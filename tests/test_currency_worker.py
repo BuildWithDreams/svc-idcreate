@@ -753,13 +753,11 @@ def test_worker_fractional_submits_all_contribution_sends_in_one_sweep(monkeypat
 
     # Sweep 1: pending -> step0 (identity_exists=True sends flow to step2)
     worker.process_once()
-    # Sweep 2: step2 submit define funding
+    # Sweep 2: step2 skips direct funding and advances to step3
     worker.process_once()
-    # Sweep 3: waiting_confirm for define-funding send
+    # Sweep 3: step3 -> step4
     worker.process_once()
-    # Sweep 4: step3 -> step4
-    worker.process_once()
-    # Sweep 5: step4 submits remaining contribution top-ups in one batched send
+    # Sweep 4: step4 submits one batched send including native + reserves
     worker.process_once()
 
     contribution_calls = [call for call in fake_rpc.sent_calls if call[2] == "DPNK@"]
@@ -767,7 +765,7 @@ def test_worker_fractional_submits_all_contribution_sends_in_one_sweep(monkeypat
     assert any(call[1] == "VRSCTEST" and call[3] >= 200.001 for call in contribution_calls)
     assert len(fake_rpc.batch_sent_calls) == 1
     assert fake_rpc.batch_sent_calls[0][0] == "RtestAddress"
-    assert len(fake_rpc.batch_sent_calls[0][1]) == 3
+    assert len(fake_rpc.batch_sent_calls[0][1]) == 4
 
 
 def test_worker_fractional_define_waits_until_funding_confirms(monkeypatch, tmp_path):
@@ -882,6 +880,7 @@ def test_worker_fractional_define_fee_topup_targets_identity(monkeypatch, tmp_pa
     monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: fake_rpc)
 
     # Advance through funding submission sweep.
+    worker.process_once()
     worker.process_once()
     worker.process_once()
     worker.process_once()

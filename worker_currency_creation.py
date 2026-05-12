@@ -153,6 +153,24 @@ def _extract_operation_or_txid(result: Any) -> tuple[str, str]:
     raise Exception(f"Unexpected operation response shape: {result}")
 
 
+def _prefer_txid_wait(rpc: Any, wait_type: str, wait_value: str, *, log_context: str) -> tuple[str, str]:
+    if wait_type != "opid_txid":
+        return wait_type, wait_value
+
+    resolved, next_wait_type, next_wait_value = resolve_wait_progress(rpc, wait_type, wait_value)
+    if resolved and next_wait_type == "tx_confirm" and next_wait_value:
+        logger.info(
+            "currency.wait.opid_resolved context=%s opid=%s txid=%s",
+            log_context,
+            wait_value,
+            next_wait_value,
+        )
+        return "tx_confirm", next_wait_value
+
+    logger.info("currency.wait.opid_pending context=%s opid=%s", log_context, wait_value)
+    return wait_type, wait_value
+
+
 def _save_currency_state(
     conn: sqlite3.Connection,
     row_id: str,
@@ -298,12 +316,29 @@ def _submit_funding_transfers(rpc: Any, source_identity: str, params: list[dict[
     send_currency_fn = getattr(rpc, "send_currency", None)
     if callable(send_currency_fn):
         result = send_currency_fn(source_identity, params)
-        return [_extract_operation_or_txid(result)]
+        wait_type, wait_value = _extract_operation_or_txid(result)
+        wait_type, wait_value = _prefer_txid_wait(
+            rpc,
+            wait_type,
+            wait_value,
+            log_context=f"batch_funding source={source_identity}",
+        )
+        return [(wait_type, wait_value)]
 
     waits: list[tuple[str, str]] = []
     for item in params:
         result = rpc.send_currency_simple_to_identity(source_identity, item["currency"], item["address"], item["amount"])
-        waits.append(_extract_operation_or_txid(result))
+        wait_type, wait_value = _extract_operation_or_txid(result)
+        wait_type, wait_value = _prefer_txid_wait(
+            rpc,
+            wait_type,
+            wait_value,
+            log_context=(
+                f"single_funding source={source_identity} currency={item['currency']} "
+                f"address={item['address']} amount={item['amount']}"
+            ),
+        )
+        waits.append((wait_type, wait_value))
     return waits
 
 
@@ -497,18 +532,38 @@ def _process_currency_simple_step(conn: sqlite3.Connection, row: sqlite3.Row, pa
 
     if step == 2:
         logger.info(
-            "currency.fractional.step2.skip_direct_funding request_id=%s reason=%s",
+            "currency.rpc.send_currency_simple_to_identity.submit request_id=%s params=%s",
             row["id"],
-            "defer native+reserve funding to step4 after balance checks and batched sendcurrency planning",
+            _safe_log_json(
+                {
+                    "from_address": payload["primary_raddress"],
+                    "currency": payload["native_coin"],
+                    "identity": f"{name}@",
+                    "amount": payload["define_funding_amount"],
+                }
+            ),
+        )
+        result = rpc.send_currency_simple_to_identity(
+            payload["primary_raddress"],
+            payload["native_coin"],
+            f"{name}@",
+            payload["define_funding_amount"],
+        )
+        wait_type, wait_value = _extract_operation_or_txid(result)
+        wait_type, wait_value = _prefer_txid_wait(
+            rpc,
+            wait_type,
+            wait_value,
+            log_context=f"simple_token_define_funding request_id={row['id']}",
         )
         _save_currency_state(
             conn,
             row["id"],
-            status="in_progress",
+            status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
             step_index=3,
             progress=progress,
-            wait_type=None,
-            wait_value=None,
+            wait_type=wait_type,
+            wait_value=wait_value,
         )
         return
 
@@ -874,32 +929,18 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
 
     if step == 2:
         logger.info(
-            "currency.rpc.send_currency_simple_to_identity.submit request_id=%s params=%s",
+            "currency.fractional.step2.skip_direct_funding request_id=%s reason=%s",
             row["id"],
-            _safe_log_json(
-                {
-                    "from_address": payload["primary_raddress"],
-                    "currency": payload["native_coin"],
-                    "identity": f"{name}@",
-                    "amount": payload["define_funding_amount"],
-                }
-            ),
+            "defer native+reserve funding to step4 after balance checks and batched sendcurrency planning",
         )
-        result = rpc.send_currency_simple_to_identity(
-            payload["primary_raddress"],
-            payload["native_coin"],
-            f"{name}@",
-            payload["define_funding_amount"],
-        )
-        wait_type, wait_value = _extract_operation_or_txid(result)
         _save_currency_state(
             conn,
             row["id"],
-            status="waiting_opid" if wait_type == "opid_txid" else "waiting_confirm",
+            status="in_progress",
             step_index=3,
             progress=progress,
-            wait_type=wait_type,
-            wait_value=wait_value,
+            wait_type=None,
+            wait_value=None,
         )
         return
 
@@ -1250,6 +1291,12 @@ def process_currency_once(
                     next_wait_value,
                 )
                 if resolved and next_wait_type == "tx_confirm":
+                    logger.info(
+                        "currency.process.waiting_opid.promoted request_id=%s opid=%s txid=%s",
+                        row["id"],
+                        opid,
+                        next_wait_value,
+                    )
                     _save_currency_state(
                         conn,
                         row["id"],

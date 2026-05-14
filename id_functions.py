@@ -79,6 +79,7 @@ def register_identity(request, svc):
                 {
                     "name": request.name,
                     "control_address": source_of_funds,
+                    "referral_id": request.referral_id or "",
                     "parent": request.parent,
                     "source_of_funds": svc._mask_value(source_of_funds),
                 }
@@ -88,7 +89,7 @@ def register_identity(request, svc):
         rnc_response = rpc_connection.register_name_commitment(
             request.name,
             source_of_funds,
-            "",
+            request.referral_id or "",
             request.parent,
             source_of_funds,
         )
@@ -123,6 +124,7 @@ def register_identity(request, svc):
                 "native_coin": request.native_coin,
                 "daemon_name": daemon_name,
                 "primary_raddress": request.primary_raddress,
+                "referral_id": request.referral_id,
                 "control_address": source_of_funds,
                 "source_of_funds": svc._mask_value(source_of_funds),
                 "status": "pending_rnc_confirm",
@@ -143,6 +145,7 @@ def register_identity(request, svc):
             native_coin,
             daemon_name,
             primary_raddress,
+            referral_id,
             control_address,
             source_of_funds,
             status,
@@ -150,7 +153,7 @@ def register_identity(request, svc):
             rnc_payload_json,
             webhook_url,
             webhook_secret
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             request_id,
@@ -159,6 +162,7 @@ def register_identity(request, svc):
             request.native_coin,
             daemon_name,
             request.primary_raddress,
+            request.referral_id,
             source_of_funds,
             source_of_funds,
             "pending_rnc_confirm",

@@ -50,6 +50,11 @@ class RegisterRequest(BaseModel):
     parent: str = Field(description="Parent namespace/currency name.", examples=["bitcoins.vrsc"])
     native_coin: str = Field(description="Ticker used to resolve enabled daemon.", examples=["VRSC"])
     primary_raddress: str = Field(description="Primary R-address for identity control.", examples=["RaliceAddress"])
+    referral_id: str | None = Field(
+        default=None,
+        description="Optional referral identity id or name sent as register_name_commitment referral id.",
+        examples=["referrer@"],
+    )
     webhook_url: str | None = Field(
         default=None,
         description="Optional callback URL notified when request reaches complete/failed status.",
@@ -428,6 +433,7 @@ def _init_db():
             native_coin TEXT NOT NULL,
             daemon_name TEXT NOT NULL,
             primary_raddress TEXT NOT NULL,
+            referral_id TEXT,
             control_address TEXT NOT NULL,
             source_of_funds TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -474,6 +480,8 @@ def _init_db():
         conn.execute("ALTER TABLE registrations ADD COLUMN webhook_next_retry_at TIMESTAMP")
     if "webhook_delivered_at" not in columns:
         conn.execute("ALTER TABLE registrations ADD COLUMN webhook_delivered_at TIMESTAMP")
+    if "referral_id" not in columns:
+        conn.execute("ALTER TABLE registrations ADD COLUMN referral_id TEXT")
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_registrations_status ON registrations(status)")
 
@@ -1307,6 +1315,7 @@ def register_form():
                 <label>Parent{parent_input_html}</label>
                 <label>Native Coin<input id="native_coin" name="native_coin" value="VRSC" required /></label>
                 <label>Primary R-Address<input id="primary_raddress" name="primary_raddress" placeholder="RaliceAddress" required /></label>
+                <label>Referral ID (optional)<input id="referral_id" name="referral_id" placeholder="referrer@" /></label>
                 <label class="full">API Key (X-API-Key)<input id="api_key" name="api_key" autocomplete="off" required /></label>
                 <label class="full">Webhook URL<input id="webhook_url" name="webhook_url" /></label>
                 <label class="full">Webhook Secret (optional)<input id="webhook_secret" name="webhook_secret" autocomplete="off" /></label>
@@ -1325,6 +1334,7 @@ def register_form():
                     parent: document.getElementById('parent').value.trim(),
                     native_coin: document.getElementById('native_coin').value.trim(),
                     primary_raddress: document.getElementById('primary_raddress').value.trim(),
+                    referral_id: document.getElementById('referral_id').value.trim() || null,
                     webhook_url: hookInput.value.trim() || null,
                     webhook_secret: document.getElementById('webhook_secret').value.trim() || null,
                 }};

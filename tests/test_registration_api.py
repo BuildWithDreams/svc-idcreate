@@ -12,7 +12,10 @@ import id_create_service
 
 
 class _FakeRpcConnection:
+    last_referral_id = None
+
     def register_name_commitment(self, name, primary_raddress, referral_id, parent, source_of_funds):
+        _FakeRpcConnection.last_referral_id = referral_id
         return {
             "txid": "txid-rnc-123",
             "namereservation": {
@@ -37,6 +40,7 @@ def _build_client(monkeypatch, tmp_path):
 
 def test_register_happy_path(monkeypatch, tmp_path):
     client = next(_build_client(monkeypatch, tmp_path))
+    _FakeRpcConnection.last_referral_id = None
 
     payload = {
         "name": "alice",
@@ -54,6 +58,34 @@ def test_register_happy_path(monkeypatch, tmp_path):
     data = resp.json()
     assert data["status"] == "pending_rnc_confirm"
     assert data["request_id"]
+    assert _FakeRpcConnection.last_referral_id == ""
+
+
+def test_register_passes_and_persists_referral_id(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    _FakeRpcConnection.last_referral_id = None
+
+    payload = {
+        "name": "alice",
+        "parent": "bitcoins.vrsc",
+        "native_coin": "VRSC",
+        "primary_raddress": "RaliceAddress",
+        "referral_id": "referrer@",
+    }
+
+    create_resp = client.post(
+        "/api/register",
+        json=payload,
+        headers={"X-API-Key": "test-key"},
+    )
+    assert create_resp.status_code == 202
+    assert _FakeRpcConnection.last_referral_id == "referrer@"
+
+    request_id = create_resp.json()["request_id"]
+    status_resp = client.get(f"/api/status/{request_id}")
+    assert status_resp.status_code == 200
+    data = status_resp.json()
+    assert data["referral_id"] == "referrer@"
 
 
 

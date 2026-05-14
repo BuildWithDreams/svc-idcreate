@@ -164,6 +164,7 @@ REGISTRAR_API_KEYS="key1,key2"
 	"parent": "bitcoins.vrsc",
 	"native_coin": "VRSC",
 	"primary_raddress": "RaliceAddress",
+	"referral_id": "referrer@",
 	"webhook_url": "https://example.com/hook",
 	"webhook_secret": "optional-per-request-secret"
 }
@@ -188,6 +189,7 @@ curl -s -X POST "http://localhost:5003/api/register" \
 		"parent": "bitcoins.vrsc",
 		"native_coin": "VRSC",
 		"primary_raddress": "RaliceAddress",
+		"referral_id": "referrer@",
 		"webhook_url": "https://example.com/hook",
 		"webhook_secret": "my-webhook-secret"
 	}'

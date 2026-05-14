@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import sqlite3
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Callable
 
 from worker_shared import get_operation_status_snapshot, get_tx_confirmations
@@ -123,6 +123,84 @@ def _build_identity_payload(full_name: str, primary_raddress: str) -> dict:
 
 
 def _resolve_fee_offer(rpc: Any, parent_namespace: str) -> float | int:
+    def _resolve_encoded_import_fee_offer(currency: dict[str, Any], id_registration_fees: float | int) -> float | None:
+        id_import_fees = currency.get("idimportfees")
+        if id_import_fees is None:
+            return None
+
+        try:
+            id_import_dec = Decimal(str(id_import_fees))
+            scaled = id_import_dec * Decimal("100000000")
+            index_dec = scaled.to_integral_value()
+            if scaled != index_dec:
+                return None
+            index = int(index_dec)
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+        if index < 0 or index > 9:
+            return None
+
+        currencies = currency.get("currencies")
+        if not isinstance(currencies, list) or index >= len(currencies):
+            logger.warning(
+                "Fee encoding index out of range parent=%s idimportfees=%s index=%s currencies_len=%s",
+                parent_namespace,
+                id_import_fees,
+                index,
+                len(currencies) if isinstance(currencies, list) else None,
+            )
+            return None
+
+        reserve_currency_id = currencies[index]
+        state = currency.get("lastconfirmedcurrencystate")
+        if not isinstance(state, dict):
+            state = currency.get("bestcurrencystate")
+        reserves = state.get("reservecurrencies") if isinstance(state, dict) else None
+        reserve_price = None
+        if isinstance(reserves, list):
+            for reserve in reserves:
+                if isinstance(reserve, dict) and reserve.get("currencyid") == reserve_currency_id:
+                    reserve_price = reserve.get("priceinreserve")
+                    break
+
+        if reserve_price is None:
+            logger.warning(
+                "Fee encoding reserve price missing parent=%s idimportfees=%s index=%s reserve_currency_id=%s",
+                parent_namespace,
+                id_import_fees,
+                index,
+                reserve_currency_id,
+            )
+            return None
+
+        try:
+            registration_fee_dec = Decimal(str(id_registration_fees))
+            reserve_price_dec = Decimal(str(reserve_price))
+            if reserve_price_dec <= 0:
+                return None
+            offer = registration_fee_dec / reserve_price_dec
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+        currency_name = None
+        names = currency.get("currencynames")
+        if isinstance(names, dict):
+            currency_name = names.get(reserve_currency_id)
+
+        logger.info(
+            "Resolved encoded namespace fee parent=%s idregistrationfees=%s idimportfees=%s index=%s reserve_currency_id=%s reserve_currency_name=%s priceinreserve=%s fee_offer=%s",
+            parent_namespace,
+            id_registration_fees,
+            id_import_fees,
+            index,
+            reserve_currency_id,
+            currency_name,
+            reserve_price,
+            str(offer),
+        )
+        return float(offer)
+
     fee_offer_env = os.getenv("FEE_OFFER", "").strip()
     if fee_offer_env:
         try:
@@ -133,6 +211,9 @@ def _resolve_fee_offer(rpc: Any, parent_namespace: str) -> float | int:
     try:
         currency = rpc.get_currency(parent_namespace)
         if isinstance(currency, dict) and currency.get("idregistrationfees") is not None:
+            encoded_offer = _resolve_encoded_import_fee_offer(currency, currency["idregistrationfees"])
+            if encoded_offer is not None:
+                return encoded_offer
             return currency["idregistrationfees"]
     except Exception as exc:
         logger.warning("Failed to resolve idregistrationfees for parent=%s error=%s", parent_namespace, exc)

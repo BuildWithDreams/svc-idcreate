@@ -2,6 +2,8 @@ import pathlib
 import sqlite3
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import id_create_service
@@ -54,6 +56,65 @@ class _FakeRpcIdentityCaptureNoCurrencyFee:
 
     def get_currency(self, currency_name_or_id):
         raise Exception("currency unavailable")
+
+    def register_identity(self, json_namecommitment_response, json_identity, source_of_funds, fee_offer=80):
+        self.last_fee_offer = fee_offer
+        return "txid-idr-capture"
+
+
+class _FakeRpcIdentityCaptureEncodedImportFee:
+    def __init__(self):
+        self.last_fee_offer = None
+
+    def get_currency(self, currency_name_or_id):
+        return {
+            "idregistrationfees": 0.75,
+            "idimportfees": 0.00000001,
+            "currencies": [
+                "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq",
+                "iRXKBVTVqEPyHrFsUbUW5ahDZRqCWGMTXd",
+            ],
+            "currencynames": {
+                "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq": "VRSCTEST",
+                "iRXKBVTVqEPyHrFsUbUW5ahDZRqCWGMTXd": "SAILING",
+            },
+            "lastconfirmedcurrencystate": {
+                "reservecurrencies": [
+                    {
+                        "currencyid": "iJhCezBExJHvtyH3fGhNnt2NhU4Ztkf2yq",
+                        "priceinreserve": 0.00019985,
+                    },
+                    {
+                        "currencyid": "iRXKBVTVqEPyHrFsUbUW5ahDZRqCWGMTXd",
+                        "priceinreserve": 0.00015995,
+                    },
+                ]
+            },
+        }
+
+    def register_identity(self, json_namecommitment_response, json_identity, source_of_funds, fee_offer=80):
+        self.last_fee_offer = fee_offer
+        return "txid-idr-capture"
+
+
+class _FakeRpcIdentityCaptureImportFeeOutOfRange:
+    def __init__(self):
+        self.last_fee_offer = None
+
+    def get_currency(self, currency_name_or_id):
+        return {
+            "idregistrationfees": 1.25,
+            "idimportfees": 0.00000009,
+            "currencies": ["iOnlyOneReserve"],
+            "lastconfirmedcurrencystate": {
+                "reservecurrencies": [
+                    {
+                        "currencyid": "iOnlyOneReserve",
+                        "priceinreserve": 0.1,
+                    }
+                ]
+            },
+        }
 
     def register_identity(self, json_namecommitment_response, json_identity, source_of_funds, fee_offer=80):
         self.last_fee_offer = fee_offer
@@ -781,3 +842,28 @@ def test_worker_fee_offer_env_overrides_currency_fee(monkeypatch, tmp_path):
 
     assert updated == 1
     assert rpc.last_fee_offer == 3.0
+
+
+def test_worker_fee_offer_uses_encoded_import_fee_index(monkeypatch, tmp_path):
+    _seed_ready_for_idr(monkeypatch, tmp_path)
+    rpc = _FakeRpcIdentityCaptureEncodedImportFee()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: rpc)
+    monkeypatch.delenv("FEE_OFFER", raising=False)
+
+    updated = worker.process_once()
+
+    assert updated == 1
+    # 0.75 / 0.00015995 = 4688.965301656767...
+    assert rpc.last_fee_offer == pytest.approx(4688.96530166, rel=0, abs=1e-8)
+
+
+def test_worker_fee_offer_falls_back_when_encoded_index_out_of_range(monkeypatch, tmp_path):
+    _seed_ready_for_idr(monkeypatch, tmp_path)
+    rpc = _FakeRpcIdentityCaptureImportFeeOutOfRange()
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: rpc)
+    monkeypatch.delenv("FEE_OFFER", raising=False)
+
+    updated = worker.process_once()
+
+    assert updated == 1
+    assert rpc.last_fee_offer == 1.25

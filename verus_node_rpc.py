@@ -299,6 +299,14 @@ class NodeRpc:
         try:
             result = self.rpc_connection.registeridentity(json_namecommitment_response, False, fee_offer, source_of_funds)
         except Exception as e:
+            logger.exception(
+                "rpc.registeridentity.error fee_offer=%s fee_offer_type=%s source_of_funds=%s payload=%s error_type=%s",
+                fee_offer,
+                type(fee_offer).__name__,
+                source_of_funds,
+                _safe_log_json(json_namecommitment_response),
+                type(e).__name__,
+            )
             raise Exception(f"Error with registering identity: {e}")
         logger.info("rpc.registeridentity.success result=%s", _safe_log_json(result))
         return result

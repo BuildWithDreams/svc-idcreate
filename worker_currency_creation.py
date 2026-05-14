@@ -123,6 +123,10 @@ def _build_identity_payload(full_name: str, primary_raddress: str) -> dict:
 
 
 def _resolve_fee_offer(rpc: Any, parent_namespace: str) -> float | int:
+    def _normalize_fee_offer(value: float | int | str) -> float:
+        dec_value = Decimal(str(value)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+        return float(dec_value)
+
     def _resolve_encoded_import_fee_offer(currency: dict[str, Any], id_registration_fees: float | int) -> float | None:
         id_import_fees = currency.get("idimportfees")
         if id_import_fees is None:
@@ -180,6 +184,7 @@ def _resolve_fee_offer(rpc: Any, parent_namespace: str) -> float | int:
             if reserve_price_dec <= 0:
                 return None
             offer = registration_fee_dec / reserve_price_dec
+            normalized_offer = Decimal(str(_normalize_fee_offer(offer)))
         except (InvalidOperation, ValueError, TypeError):
             return None
 
@@ -189,7 +194,7 @@ def _resolve_fee_offer(rpc: Any, parent_namespace: str) -> float | int:
             currency_name = names.get(reserve_currency_id)
 
         logger.info(
-            "Resolved encoded namespace fee parent=%s idregistrationfees=%s idimportfees=%s index=%s reserve_currency_id=%s reserve_currency_name=%s priceinreserve=%s fee_offer=%s",
+            "Resolved encoded namespace fee parent=%s idregistrationfees=%s idimportfees=%s index=%s reserve_currency_id=%s reserve_currency_name=%s priceinreserve=%s fee_offer_raw=%s fee_offer_normalized=%s",
             parent_namespace,
             id_registration_fees,
             id_import_fees,
@@ -198,13 +203,14 @@ def _resolve_fee_offer(rpc: Any, parent_namespace: str) -> float | int:
             currency_name,
             reserve_price,
             str(offer),
+            str(normalized_offer),
         )
-        return float(offer)
+        return float(normalized_offer)
 
     fee_offer_env = os.getenv("FEE_OFFER", "").strip()
     if fee_offer_env:
         try:
-            return float(fee_offer_env)
+            return _normalize_fee_offer(fee_offer_env)
         except ValueError:
             logger.warning("Invalid FEE_OFFER value=%s; falling back to currency idregistrationfees", fee_offer_env)
 
@@ -214,7 +220,7 @@ def _resolve_fee_offer(rpc: Any, parent_namespace: str) -> float | int:
             encoded_offer = _resolve_encoded_import_fee_offer(currency, currency["idregistrationfees"])
             if encoded_offer is not None:
                 return encoded_offer
-            return currency["idregistrationfees"]
+            return _normalize_fee_offer(currency["idregistrationfees"])
     except Exception as exc:
         logger.warning("Failed to resolve idregistrationfees for parent=%s error=%s", parent_namespace, exc)
 

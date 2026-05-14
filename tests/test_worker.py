@@ -121,6 +121,24 @@ class _FakeRpcIdentityCaptureImportFeeOutOfRange:
         return "txid-idr-capture"
 
 
+class _FakeRpcIdentityInsufficientThenSuccess:
+    def __init__(self, fee=100.0, fail_count=1):
+        self.fee = fee
+        self.fail_count = fail_count
+        self.calls = 0
+        self.fee_offers = []
+
+    def get_currency(self, currency_name_or_id):
+        return {"idregistrationfees": self.fee}
+
+    def register_identity(self, json_namecommitment_response, json_identity, source_of_funds, fee_offer=80):
+        self.calls += 1
+        self.fee_offers.append(fee_offer)
+        if self.calls <= self.fail_count:
+            raise Exception("registeridentity: Insufficient funds for identity registration (code -8)")
+        return "txid-idr-capture"
+
+
 class _FakeRpcIdrPending:
     def get_raw_transaction(self, txid, verbose=1):
         return {"txid": txid, "confirmations": 0}
@@ -867,3 +885,58 @@ def test_worker_fee_offer_falls_back_when_encoded_index_out_of_range(monkeypatch
 
     assert updated == 1
     assert rpc.last_fee_offer == 1.25
+
+
+def test_worker_ready_for_idr_retries_with_fee_bump_on_insufficient_funds(monkeypatch, tmp_path):
+    _seed_ready_for_idr(monkeypatch, tmp_path)
+    rpc = _FakeRpcIdentityInsufficientThenSuccess(fee=100.0, fail_count=1)
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: rpc)
+    monkeypatch.setenv("IDR_FEE_BUMP_RATE", "0.0025")
+    monkeypatch.setenv("IDR_FEE_BUMP_MAX_INCREASES", "5")
+    monkeypatch.delenv("FEE_OFFER", raising=False)
+
+    updated = worker.process_once()
+
+    assert updated == 1
+    assert len(rpc.fee_offers) == 2
+    assert rpc.fee_offers[0] == 100.0
+    assert rpc.fee_offers[1] == pytest.approx(100.25, rel=0, abs=1e-8)
+
+    conn = sqlite3.connect(str(tmp_path / "registrar.db"))
+    row = conn.execute(
+        "SELECT status, idr_txid, attempts FROM registrations WHERE id = ?",
+        ("req-2",),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "idr_submitted"
+    assert row[1] == "txid-idr-capture"
+    assert row[2] == 0
+
+
+def test_worker_ready_for_idr_stops_after_max_fee_bumps(monkeypatch, tmp_path):
+    _seed_ready_for_idr(monkeypatch, tmp_path)
+    rpc = _FakeRpcIdentityInsufficientThenSuccess(fee=100.0, fail_count=99)
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: rpc)
+    monkeypatch.setenv("IDR_FEE_BUMP_RATE", "0.0025")
+    monkeypatch.setenv("IDR_FEE_BUMP_MAX_INCREASES", "2")
+    monkeypatch.delenv("FEE_OFFER", raising=False)
+
+    updated = worker.process_once()
+
+    assert updated == 1
+    # base + 2 fee-bumped retries
+    assert len(rpc.fee_offers) == 3
+    assert rpc.fee_offers[0] == 100.0
+    assert rpc.fee_offers[1] == pytest.approx(100.25, rel=0, abs=1e-8)
+    assert rpc.fee_offers[2] == pytest.approx(100.500625, rel=0, abs=1e-8)
+
+    conn = sqlite3.connect(str(tmp_path / "registrar.db"))
+    row = conn.execute(
+        "SELECT status, attempts, next_retry_at, error_message FROM registrations WHERE id = ?",
+        ("req-2",),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "ready_for_idr"
+    assert row[1] == 1
+    assert row[2] is not None
+    assert "Insufficient funds for identity registration" in row[3]

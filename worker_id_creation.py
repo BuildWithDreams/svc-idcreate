@@ -1,9 +1,19 @@
 import json
 import os
 import sqlite3
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable
 
 from worker_shared import get_tx_confirmations
+
+
+def _normalize_fee_offer(value: float | int) -> float:
+    return float(Decimal(str(value)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN))
+
+
+def _is_insufficient_identity_registration_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "insufficient funds for identity registration" in message or "(code -8)" in message
 
 
 def process_identity_once(
@@ -143,27 +153,60 @@ def process_identity_once(
         rnc_payload = json.loads(row["rnc_payload_json"])
         full_name = f'{row["requested_name"]}.{row["parent_namespace"]}'
         identity_payload = build_identity_payload(full_name, row["primary_raddress"])
-        fee_offer = resolve_fee_offer(rpc, row["parent_namespace"])
+        fee_offer = _normalize_fee_offer(resolve_fee_offer(rpc, row["parent_namespace"]))
+        fee_bump_rate = float(os.getenv("IDR_FEE_BUMP_RATE", "0.0025"))
+        if fee_bump_rate < 0:
+            fee_bump_rate = 0.0
+        max_fee_bumps = int(os.getenv("IDR_FEE_BUMP_MAX_INCREASES", "5"))
+        if max_fee_bumps < 0:
+            max_fee_bumps = 0
         logger.debug(
-            "worker.process_once.ready_for_idr.computed request_id=%s full_name=%s rnc_payload=%s identity_payload=%s fee_offer=%s",
+            "worker.process_once.ready_for_idr.computed request_id=%s full_name=%s rnc_payload=%s identity_payload=%s fee_offer=%s fee_bump_rate=%s max_fee_bumps=%s",
             row["id"],
             full_name,
             log_json(rnc_payload),
             log_json(identity_payload),
             fee_offer,
+            fee_bump_rate,
+            max_fee_bumps,
         )
 
         try:
-            txid = rpc.register_identity(
-                rnc_payload,
-                identity_payload,
-                row["source_of_funds"],
-                fee_offer,
-            )
+            fee_offer_current = fee_offer
+            fee_bumps_used = 0
+            while True:
+                try:
+                    txid = rpc.register_identity(
+                        rnc_payload,
+                        identity_payload,
+                        row["source_of_funds"],
+                        fee_offer_current,
+                    )
+                    break
+                except Exception as exc:
+                    if not _is_insufficient_identity_registration_error(exc) or fee_bumps_used >= max_fee_bumps:
+                        raise
+
+                    next_fee_offer = _normalize_fee_offer(fee_offer_current * (1 + fee_bump_rate))
+                    if next_fee_offer <= fee_offer_current:
+                        next_fee_offer = _normalize_fee_offer(fee_offer_current + 0.00000001)
+                    fee_bumps_used += 1
+                    logger.warning(
+                        "worker.process_once.ready_for_idr.retry_with_fee_bump request_id=%s bump_index=%s max_fee_bumps=%s fee_offer_from=%s fee_offer_to=%s error=%s",
+                        row["id"],
+                        fee_bumps_used,
+                        max_fee_bumps,
+                        fee_offer_current,
+                        next_fee_offer,
+                        str(exc),
+                    )
+                    fee_offer_current = next_fee_offer
             logger.info(
-                "worker.process_once.ready_for_idr.submitted request_id=%s to=idr_submitted idr_txid=%s",
+                "worker.process_once.ready_for_idr.submitted request_id=%s to=idr_submitted idr_txid=%s fee_offer=%s fee_bumps_used=%s",
                 row["id"],
                 txid,
+                fee_offer_current,
+                fee_bumps_used,
             )
             conn.execute(
                 """

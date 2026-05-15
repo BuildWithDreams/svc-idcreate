@@ -226,6 +226,119 @@ def test_create_simple_currency_rejects_when_currency_already_exists(monkeypatch
     assert resp.status_code == 409
     assert "Currency already exists" in str(resp.json())
 
+    def test_delete_currency_request_by_id(monkeypatch, tmp_path):
+        client = next(_build_client(monkeypatch, tmp_path))
+
+        create_resp = client.post(
+            "/api/currency/simple",
+            json={
+                "name": "TENNIS",
+                "parent": "bitcoins.vrsc",
+                "native_coin": "VRSC",
+                "primary_raddress": "RtestAddress",
+                "pre_allocation_id": "blockoneminer@",
+                "pre_allocation_amount": 80000,
+            },
+            headers={"X-API-Key": "test-key"},
+        )
+        assert create_resp.status_code == 202
+        request_id = create_resp.json()["request_id"]
+
+        delete_resp = client.delete(
+            f"/api/currency/request/{request_id}",
+            headers={"X-API-Key": "test-key"},
+        )
+        assert delete_resp.status_code == 200
+        assert delete_resp.json()["request_id"] == request_id
+        assert delete_resp.json()["status"] == "deleted"
+
+        status_resp = client.get(f"/api/currency/status/{request_id}")
+        assert status_resp.status_code == 404
+
+
+def test_delete_currency_request_returns_404_for_unknown_id(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    delete_resp = client.delete(
+        "/api/currency/request/does-not-exist",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert delete_resp.status_code == 404
+    assert "Currency request not found" in str(delete_resp.json())
+
+
+def test_list_currency_requests_returns_items(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    create_resp = client.post(
+        "/api/currency/simple",
+        json={
+            "name": "TENNIS",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RtestAddress",
+            "pre_allocation_id": "blockoneminer@",
+            "pre_allocation_amount": 80000,
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+    assert create_resp.status_code == 202
+    request_id = create_resp.json()["request_id"]
+
+    list_resp = client.get(
+        "/api/currency/requests?limit=10",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert list_resp.status_code == 200
+    body = list_resp.json()
+    assert body["count"] >= 1
+    assert any(item["id"] == request_id for item in body["items"])
+
+
+def test_list_currency_requests_filters_by_status(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _ExistingCurrencyRpc())
+
+    # This request is rejected early and does not create a DB row.
+    rejected_resp = client.post(
+        "/api/currency/simple",
+        json={
+            "name": "EXISTS",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RtestAddress",
+            "pre_allocation_id": "blockoneminer@",
+            "pre_allocation_amount": 80000,
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+    assert rejected_resp.status_code == 409
+
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _MissingCurrencyRpc())
+    pending_resp = client.post(
+        "/api/currency/simple",
+        json={
+            "name": "NEWONE",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RtestAddress",
+            "pre_allocation_id": "blockoneminer@",
+            "pre_allocation_amount": 80000,
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+    assert pending_resp.status_code == 202
+    pending_request_id = pending_resp.json()["request_id"]
+
+    list_pending = client.get(
+        "/api/currency/requests?status=pending&limit=20",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert list_pending.status_code == 200
+    payload = list_pending.json()
+    assert payload["count"] >= 1
+    assert all(item["status"] == "pending" for item in payload["items"])
+    assert any(item["id"] == pending_request_id for item in payload["items"])
 
 def test_create_fractional_currency_rejects_when_currency_already_exists(monkeypatch, tmp_path):
     client = next(_build_client(monkeypatch, tmp_path))

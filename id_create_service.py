@@ -398,6 +398,73 @@ def _get_currency_request_record(request_id: str) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def _delete_currency_request_record(request_id: str) -> bool:
+    conn = _get_db_connection()
+    result = conn.execute("DELETE FROM currency_requests WHERE id = ?", (request_id,))
+    conn.commit()
+    conn.close()
+    return result.rowcount > 0
+
+
+def _list_currency_request_records(*, limit: int, statuses: list[str] | None = None) -> list[dict]:
+    conn = _get_db_connection()
+    try:
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    id,
+                    workflow_type,
+                    requested_name,
+                    parent_namespace,
+                    native_coin,
+                    daemon_name,
+                    status,
+                    attempts,
+                    next_retry_at,
+                    error_message,
+                    wait_type,
+                    wait_value,
+                    updated_at,
+                    created_at
+                FROM currency_requests
+                WHERE status IN ({placeholders})
+                ORDER BY datetime(updated_at) DESC
+                LIMIT ?
+                """,
+                (*statuses, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    workflow_type,
+                    requested_name,
+                    parent_namespace,
+                    native_coin,
+                    daemon_name,
+                    status,
+                    attempts,
+                    next_retry_at,
+                    error_message,
+                    wait_type,
+                    wait_value,
+                    updated_at,
+                    created_at
+                FROM currency_requests
+                ORDER BY datetime(updated_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    finally:
+        conn.close()
+
+    return [dict(row) for row in rows]
+
+
 def _list_storage_chunk_records(upload_id: str) -> list[dict]:
     conn = _get_db_connection()
     rows = conn.execute(
@@ -1078,6 +1145,40 @@ def get_currency_status(request_id: str):
     if progress:
         row["progress"] = json.loads(progress)
     return row
+
+
+@app.get("/api/currency/requests", summary="List currency creation requests for operations")
+def list_currency_requests(
+    limit: int = Query(default=50, ge=1, le=500, description="Maximum number of currency requests to return."),
+    status: str | None = Query(
+        default=None,
+        description="Optional status filter. Provide a single status or comma-separated statuses.",
+    ),
+    api_key: str = Security(_require_api_key),
+):
+    statuses: list[str] | None = None
+    if status is not None:
+        parsed_statuses = [value.strip() for value in status.split(",") if value.strip()]
+        if parsed_statuses:
+            statuses = parsed_statuses
+
+    items = _list_currency_request_records(limit=limit, statuses=statuses)
+    return {
+        "count": len(items),
+        "items": items,
+    }
+
+
+@app.delete("/api/currency/request/{request_id}", summary="Delete a currency creation request by request id")
+def delete_currency_request(request_id: str, api_key: str = Security(_require_api_key)):
+    deleted = _delete_currency_request_record(request_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Currency request not found")
+
+    return {
+        "request_id": request_id,
+        "status": "deleted",
+    }
 
 
 @app.post("/api/storage/upload", status_code=202, summary="Create storage upload request")

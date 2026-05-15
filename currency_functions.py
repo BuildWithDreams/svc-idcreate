@@ -1,5 +1,23 @@
 import json
+import logging
 import uuid
+
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_currency_does_not_exist_or_409(*, name: str, parent: str, daemon_name: str, svc) -> None:
+    full_name = f"{name}.{parent}"
+    try:
+        rpc = svc._get_rpc_connection(daemon_name)
+        existing = rpc.get_currency(full_name)
+    except Exception as exc:
+        # Non-existent currencies typically raise from getcurrency; keep request flow unchanged.
+        logger.info("currency.precheck.get_currency.not_found name=%s daemon=%s error=%s", full_name, daemon_name, exc)
+        return
+
+    if isinstance(existing, dict) and bool(existing):
+        raise svc.HTTPException(status_code=409, detail=f"Currency already exists: {full_name}")
 
 
 def build_currency_request_response(request_id: str, status: str, workflow_type: str, daemon_name: str, native_coin: str):
@@ -176,6 +194,12 @@ def currency_plan_template(mode: str = "auto") -> dict:
 def create_simple_currency(request, svc):
     daemon_name = svc._resolve_currency_daemon_or_503(request.native_coin)
     svc._validate_currency_parent_or_403(request.parent)
+    _ensure_currency_does_not_exist_or_409(
+        name=request.name,
+        parent=request.parent,
+        daemon_name=daemon_name,
+        svc=svc,
+    )
 
     source_of_funds = svc.os.getenv("SOURCE_OF_FUNDS", "").strip()
     if not source_of_funds:
@@ -203,6 +227,12 @@ def create_simple_currency(request, svc):
 def create_fractional_currency(request, svc):
     daemon_name = svc._resolve_currency_daemon_or_503(request.native_coin)
     svc._validate_currency_parent_or_403(request.parent)
+    _ensure_currency_does_not_exist_or_409(
+        name=request.name,
+        parent=request.parent,
+        daemon_name=daemon_name,
+        svc=svc,
+    )
 
     source_of_funds = svc.os.getenv("SOURCE_OF_FUNDS", "").strip()
     if not source_of_funds:
@@ -237,6 +267,12 @@ def create_fractional_currency(request, svc):
 def create_currency_from_plan(request, svc):
     daemon_name = svc._resolve_currency_daemon_or_503(request.native_coin)
     svc._validate_currency_parent_or_403(request.parent)
+    _ensure_currency_does_not_exist_or_409(
+        name=request.name,
+        parent=request.parent,
+        daemon_name=daemon_name,
+        svc=svc,
+    )
 
     source_of_funds = svc.os.getenv("SOURCE_OF_FUNDS", "").strip()
     if not source_of_funds:

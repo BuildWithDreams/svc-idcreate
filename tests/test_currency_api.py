@@ -10,12 +10,23 @@ from fastapi.testclient import TestClient
 import id_create_service
 
 
+class _MissingCurrencyRpc:
+    def get_currency(self, currency_name_or_id):
+        raise Exception(f"Currency not found: {currency_name_or_id}")
+
+
+class _ExistingCurrencyRpc:
+    def get_currency(self, currency_name_or_id):
+        return {"name": currency_name_or_id, "currencyid": "i" * 40}
+
+
 def _build_client(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
     monkeypatch.setenv("REGISTRAR_API_KEYS", "test-key")
     monkeypatch.setenv("SOURCE_OF_FUNDS", "RsourceFundsAddr")
     monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: "verusd_vrsc")
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _MissingCurrencyRpc())
 
     with TestClient(id_create_service.app) as client:
         yield client
@@ -193,6 +204,82 @@ def test_currency_request_rejects_missing_api_key(monkeypatch, tmp_path):
     )
 
     assert resp.status_code == 403
+
+
+def test_create_simple_currency_rejects_when_currency_already_exists(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _ExistingCurrencyRpc())
+
+    resp = client.post(
+        "/api/currency/simple",
+        json={
+            "name": "TENNIS",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RtestAddress",
+            "pre_allocation_id": "blockoneminer@",
+            "pre_allocation_amount": 80000,
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 409
+    assert "Currency already exists" in str(resp.json())
+
+
+def test_create_fractional_currency_rejects_when_currency_already_exists(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _ExistingCurrencyRpc())
+
+    payload = {
+        "name": "SIXTH",
+        "parent": "bitcoins.vrsc",
+        "native_coin": "VRSC",
+        "primary_raddress": "RtestAddress",
+        "initial_supply": 100000,
+        "id_registration_fees": 50,
+        "id_referral_levels": 0,
+        "start_block": 28000,
+        "native": {
+            "name": "VRSCTEST",
+            "weight": 0.5,
+            "initial_contribution": 20,
+        },
+        "reserves": [],
+        "create_reserves": False,
+    }
+    resp = client.post(
+        "/api/currency/fractional",
+        json=payload,
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 409
+    assert "Currency already exists" in str(resp.json())
+
+
+def test_plan_endpoint_rejects_when_currency_already_exists(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _ExistingCurrencyRpc())
+
+    resp = client.post(
+        "/api/currency/plan",
+        json={
+            "name": "TENNIS",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RtestAddress",
+            "mode": "auto",
+            "simple": {
+                "pre_allocation_id": "blockoneminer@",
+                "pre_allocation_amount": 80000,
+            },
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 409
+    assert "Currency already exists" in str(resp.json())
 
 
 def test_plan_endpoint_auto_routes_to_simple(monkeypatch, tmp_path):

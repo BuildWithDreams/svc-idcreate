@@ -82,6 +82,10 @@ def _retry_config() -> tuple[int, int]:
     return max_retries, base_seconds
 
 
+def _next_retry_timestamp(delay_seconds: int) -> str:
+    return f"now + {delay_seconds} seconds"
+
+
 def _record_currency_retry_or_failure(conn: sqlite3.Connection, row_id: str, attempts: int, error: str, status: str):
     max_retries, base_seconds = _retry_config()
     next_attempt = attempts + 1
@@ -98,13 +102,14 @@ def _record_currency_retry_or_failure(conn: sqlite3.Connection, row_id: str, att
         return
 
     delay_seconds = base_seconds * (2 ** (next_attempt - 1))
+    next_retry_at = _next_retry_timestamp(delay_seconds)
     conn.execute(
         """
         UPDATE currency_requests
-        SET status = ?, attempts = ?, error_message = ?, next_retry_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP
+        SET status = ?, attempts = ?, error_message = ?, next_retry_at = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (status, next_attempt, error, f"+{delay_seconds} seconds", row_id),
+        (status, next_attempt, error, next_retry_at, row_id),
     )
 
 
@@ -1495,7 +1500,7 @@ def process_currency_once(
         FROM currency_requests
         WHERE status IN ('pending', 'in_progress', 'waiting_confirm', 'waiting_opid')
           AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
-        ORDER BY datetime(updated_at) ASC
+                ORDER BY updated_at ASC
         """
     ).fetchall()
 

@@ -17,10 +17,10 @@ import json
 import logging
 import os
 import random
-import sqlite3
 import time
 from typing import Optional
 
+import db
 from provisioning.adapters import ProvisioningAdapter
 
 
@@ -78,10 +78,8 @@ class ProvisioningEngine:
         # }
         self._challenge_store: dict[str, dict] = {}
 
-    def _db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _db(self):
+        return db.get_db_connection(self._db_path)
 
     def _init_challenge_store_db(self) -> None:
         conn = self._db()
@@ -117,48 +115,92 @@ class ProvisioningEngine:
 
     def _save_challenge_record(self, record: dict) -> None:
         conn = self._db()
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO provisioning_challenges (
-                challenge_id,
-                name,
-                parent,
-                system_id,
-                primary_raddress,
-                challenge_hex,
-                challenge_json,
-                deeplink_uri,
-                expires_at,
-                created_at,
-                status,
-                request_id,
-                identity_address,
-                fully_qualified_name,
-                error_message,
-                error_key,
-                updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record["challenge_id"],
-                record["name"],
-                record["parent"],
-                record["system_id"],
-                record["primary_raddress"],
-                record["challenge_hex"],
-                json.dumps(record["challenge_json"]),
-                record["deeplink_uri"],
-                int(record["expires_at"]),
-                int(record["created_at"]),
-                record["status"],
-                record.get("request_id"),
-                record.get("identity_address"),
-                record.get("fully_qualified_name"),
-                record.get("error_message"),
-                record.get("error_key"),
-                int(time.time()),
-            ),
+        params = (
+            record["challenge_id"],
+            record["name"],
+            record["parent"],
+            record["system_id"],
+            record["primary_raddress"],
+            record["challenge_hex"],
+            json.dumps(record["challenge_json"]),
+            record["deeplink_uri"],
+            int(record["expires_at"]),
+            int(record["created_at"]),
+            record["status"],
+            record.get("request_id"),
+            record.get("identity_address"),
+            record.get("fully_qualified_name"),
+            record.get("error_message"),
+            record.get("error_key"),
+            int(time.time()),
         )
+        if db.is_postgres_enabled():
+            conn.execute(
+                """
+                INSERT INTO provisioning_challenges (
+                    challenge_id,
+                    name,
+                    parent,
+                    system_id,
+                    primary_raddress,
+                    challenge_hex,
+                    challenge_json,
+                    deeplink_uri,
+                    expires_at,
+                    created_at,
+                    status,
+                    request_id,
+                    identity_address,
+                    fully_qualified_name,
+                    error_message,
+                    error_key,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (challenge_id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    parent = EXCLUDED.parent,
+                    system_id = EXCLUDED.system_id,
+                    primary_raddress = EXCLUDED.primary_raddress,
+                    challenge_hex = EXCLUDED.challenge_hex,
+                    challenge_json = EXCLUDED.challenge_json,
+                    deeplink_uri = EXCLUDED.deeplink_uri,
+                    expires_at = EXCLUDED.expires_at,
+                    created_at = EXCLUDED.created_at,
+                    status = EXCLUDED.status,
+                    request_id = EXCLUDED.request_id,
+                    identity_address = EXCLUDED.identity_address,
+                    fully_qualified_name = EXCLUDED.fully_qualified_name,
+                    error_message = EXCLUDED.error_message,
+                    error_key = EXCLUDED.error_key,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                params,
+            )
+        else:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO provisioning_challenges (
+                    challenge_id,
+                    name,
+                    parent,
+                    system_id,
+                    primary_raddress,
+                    challenge_hex,
+                    challenge_json,
+                    deeplink_uri,
+                    expires_at,
+                    created_at,
+                    status,
+                    request_id,
+                    identity_address,
+                    fully_qualified_name,
+                    error_message,
+                    error_key,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                params,
+            )
         conn.commit()
         conn.close()
         logger.debug(
@@ -168,7 +210,7 @@ class ProvisioningEngine:
             record.get("request_id"),
         )
 
-    def _row_to_record(self, row: sqlite3.Row) -> dict:
+    def _row_to_record(self, row) -> dict:
         record = dict(row)
         record["challenge_json"] = json.loads(record["challenge_json"])
         return record

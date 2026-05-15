@@ -9,7 +9,8 @@ This service has two runtime components:
 - API service: FastAPI app (`id_create_service.py`)
 - Worker service: background state machine (`worker.py`)
 
-Both must share the same SQLite database file (`REGISTRAR_DB_PATH`).
+Recommended deployment is PostgreSQL via `DATABASE_URL`.
+SQLite remains available only as a fallback when `DATABASE_URL` is unset.
 
 ## 1. Prepare environment
 
@@ -22,8 +23,8 @@ REGISTRAR_API_KEYS=key1,key2
 # service wallet
 SOURCE_OF_FUNDS=RsourceFundsAddr
 
-# SQLite
-REGISTRAR_DB_PATH=/data/registrar.db
+# PostgreSQL (recommended)
+DATABASE_URL=postgresql://idcreate:idcreate@postgres:5432/idcreate
 
 # worker retries
 WORKER_MAX_RETRIES=5
@@ -46,23 +47,32 @@ verusd_vrsc_rpc_port=...
 verusd_vrsc_rpc_host=...
 ```
 
+Optional SQLite fallback (not recommended for high concurrency):
+
+```env
+REGISTRAR_DB_PATH=/data/registrar.db
+```
+
 ## 2. Build and start with Docker Compose
 
+Use the sample stack (includes PostgreSQL, API, worker, and provisioning service):
+
 ```bash
-docker compose -f docker-compose.yaml up -d --build
+docker compose -f sample.docker-compose.yaml up -d --build
 ```
 
 Check status:
 
 ```bash
-docker compose -f docker-compose.yaml ps
+docker compose -f sample.docker-compose.yaml ps
 ```
 
 Tail logs:
 
 ```bash
-docker compose -f docker-compose.yaml logs -f idcreate-api
-docker compose -f docker-compose.yaml logs -f idcreate-worker
+docker compose -f sample.docker-compose.yaml logs -f idcreate-api
+docker compose -f sample.docker-compose.yaml logs -f idcreate-worker
+docker compose -f sample.docker-compose.yaml logs -f postgres
 ```
 
 ## 3. Verify deployment
@@ -107,9 +117,9 @@ curl -s -X POST "http://localhost:5003/api/webhook/requeue/<request_id>" \
   -H "X-API-Key: key1"
 ```
 
-## 5. Backup and restore (SQLite)
+## 5. Backup and restore (PostgreSQL)
 
-Compose stores DB on volume `idcreate_data` at `/data/registrar.db`.
+Compose stores DB data on volume `idcreate_postgres_data`.
 
 Recommended:
 
@@ -117,11 +127,17 @@ Recommended:
 - keep at least daily backups
 - keep longer retention for operational audits
 
+Example backup command:
+
+```bash
+docker compose -f sample.docker-compose.yaml exec -T postgres pg_dump -U idcreate -d idcreate > idcreate_backup.sql
+```
+
 ## 6. Updating service
 
 ```bash
-docker compose -f docker-compose.yaml pull
-docker compose -f docker-compose.yaml up -d --build
+docker compose -f sample.docker-compose.yaml pull
+docker compose -f sample.docker-compose.yaml up -d --build
 ```
 
 Because schema migration is handled in app startup, startup updates are forward-compatible for the current fields.
@@ -178,4 +194,4 @@ If you prefer cron over a containerized worker, run API container only and execu
 * * * * * cd /path/to/svc-idcreate && /home/mylo/.local/bin/uv run python worker.py >> /var/log/svc-idcreate-worker.log 2>&1
 ```
 
-In this mode, ensure host worker uses the same `REGISTRAR_DB_PATH` as API.
+In this mode, ensure host worker uses the same `DATABASE_URL` as API (or the same `REGISTRAR_DB_PATH` only when intentionally running SQLite fallback).

@@ -82,6 +82,24 @@ uv sync
 uv run fastapi dev id_create_service.py --port 5003
 ```
 
+### PostgreSQL cutover (no data migration)
+
+If you are replacing SQLite and do not need to keep existing data, set `DATABASE_URL` and deploy.
+When `DATABASE_URL` is set to a Postgres DSN, runtime DB access uses PostgreSQL.
+If `DATABASE_URL` is unset, the service continues using SQLite via `REGISTRAR_DB_PATH`.
+
+Example:
+
+```env
+DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/idcreate"
+```
+
+Notes:
+
+- On startup, tables are created automatically in the target database.
+- Existing SQLite files are not migrated.
+- Recommended for concurrent webhook/worker traffic to avoid SQLite lock contention.
+
 Swagger/OpenAPI:
 
 - `http://localhost:5003/docs`

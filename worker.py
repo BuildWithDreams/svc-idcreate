@@ -42,10 +42,8 @@ def _log_json(data: Any) -> str:
         return str(data)
 
 
-def _get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(id_create_service._get_db_path())
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_db_connection():
+    return id_create_service._get_db_connection()
 
 
 def _get_rpc_connection(daemon_name: str) -> Any:
@@ -56,6 +54,10 @@ def _retry_config() -> tuple[int, int]:
     max_retries = int(os.getenv("WORKER_MAX_RETRIES", "5"))
     base_seconds = int(os.getenv("WORKER_RETRY_BASE_SECONDS", "15"))
     return max_retries, base_seconds
+
+
+def _next_retry_timestamp(delay_seconds: int) -> str:
+    return f"now + {delay_seconds} seconds"
 
 
 def _record_retry_or_failure(conn: sqlite3.Connection, row_id: str, attempts: int, error: str, status: str):
@@ -74,13 +76,14 @@ def _record_retry_or_failure(conn: sqlite3.Connection, row_id: str, attempts: in
         return
 
     delay_seconds = base_seconds * (2 ** (next_attempt - 1))
+    next_retry_at = _next_retry_timestamp(delay_seconds)
     conn.execute(
         """
         UPDATE registrations
-        SET status = ?, attempts = ?, error_message = ?, next_retry_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP
+        SET status = ?, attempts = ?, error_message = ?, next_retry_at = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (status, next_attempt, error, f"+{delay_seconds} seconds", row_id),
+        (status, next_attempt, error, next_retry_at, row_id),
     )
 
 
@@ -106,13 +109,14 @@ def _record_webhook_retry_or_failure(conn: sqlite3.Connection, row_id: str, atte
         return
 
     delay_seconds = base_seconds * (2 ** (next_attempt - 1))
+    next_retry_at = _next_retry_timestamp(delay_seconds)
     conn.execute(
         """
         UPDATE registrations
-        SET webhook_attempts = ?, webhook_last_error = ?, webhook_next_retry_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP
+        SET webhook_attempts = ?, webhook_last_error = ?, webhook_next_retry_at = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (next_attempt, error, f"+{delay_seconds} seconds", row_id),
+        (next_attempt, error, next_retry_at, row_id),
     )
 
 
@@ -282,13 +286,14 @@ def _record_storage_retry_or_failure(conn: sqlite3.Connection, upload_id: str, a
         return False
 
     delay_seconds = base_seconds * (2 ** (next_attempt - 1))
+    next_retry_at = _next_retry_timestamp(delay_seconds)
     conn.execute(
         """
         UPDATE storage_uploads
-        SET status = ?, attempts = ?, error_message = ?, next_retry_at = datetime('now', ?), updated_at = CURRENT_TIMESTAMP
+        SET status = ?, attempts = ?, error_message = ?, next_retry_at = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (status, next_attempt, error, f"+{delay_seconds} seconds", upload_id),
+        (status, next_attempt, error, next_retry_at, upload_id),
     )
     return True
 
@@ -534,7 +539,7 @@ def process_storage_once() -> int:
         FROM storage_uploads
         WHERE status IN ('uploading', 'confirming')
           AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
-        ORDER BY datetime(updated_at) ASC
+                ORDER BY updated_at ASC
         """
     ).fetchall()
     conn.close()

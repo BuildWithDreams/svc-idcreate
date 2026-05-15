@@ -10,7 +10,6 @@ from pydantic import AliasChoices, BaseModel, Field, model_validator
 from contextlib import asynccontextmanager
 import os
 import json
-import sqlite3
 import uuid
 import logging
 import math
@@ -20,6 +19,7 @@ from SFConstants import DAEMON_CONFIGS, DAEMON_VERUSD_VRSC, VTRC_NATIVE_COINS
 import currency_functions
 import shared_functions
 import services
+import db
 
 # Provisioning endpoints
 from provisioning.router import router as provisioning_router
@@ -248,10 +248,8 @@ def _get_db_path() -> str:
     return os.getenv("REGISTRAR_DB_PATH", "registrar.db")
 
 
-def _get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(_get_db_path())
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_db_connection():
+    return db.get_db_connection(_get_db_path())
 
 
 def _create_storage_upload_record(record: dict) -> None:
@@ -430,7 +428,7 @@ def _list_currency_request_records(*, limit: int, statuses: list[str] | None = N
                     created_at
                 FROM currency_requests
                 WHERE status IN ({placeholders})
-                ORDER BY datetime(updated_at) DESC
+                ORDER BY updated_at DESC
                 LIMIT ?
                 """,
                 (*statuses, limit),
@@ -454,7 +452,7 @@ def _list_currency_request_records(*, limit: int, statuses: list[str] | None = N
                     updated_at,
                     created_at
                 FROM currency_requests
-                ORDER BY datetime(updated_at) DESC
+                ORDER BY updated_at DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -533,6 +531,132 @@ def _chunk_bytes_from_rpc(rpc_connection, identity_fqn: str, chunk_row: dict) ->
 
 def _init_db():
     conn = _get_db_connection()
+    if db.is_postgres_enabled():
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS registrations (
+                id TEXT PRIMARY KEY,
+                requested_name TEXT NOT NULL,
+                parent_namespace TEXT NOT NULL,
+                native_coin TEXT NOT NULL,
+                daemon_name TEXT NOT NULL,
+                primary_raddress TEXT NOT NULL,
+                referral_id TEXT,
+                control_address TEXT NOT NULL,
+                source_of_funds TEXT NOT NULL,
+                status TEXT NOT NULL,
+                rnc_txid TEXT,
+                rnc_payload_json TEXT,
+                idr_txid TEXT,
+                error_message TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TIMESTAMP,
+                webhook_url TEXT,
+                webhook_secret TEXT,
+                webhook_delivered BOOLEAN NOT NULL DEFAULT FALSE,
+                webhook_attempts INTEGER NOT NULL DEFAULT 0,
+                webhook_last_error TEXT,
+                webhook_next_retry_at TIMESTAMP,
+                webhook_delivered_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_registrations_status ON registrations(status)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS currency_requests (
+                id TEXT PRIMARY KEY,
+                workflow_type TEXT NOT NULL,
+                requested_name TEXT NOT NULL,
+                parent_namespace TEXT NOT NULL,
+                native_coin TEXT NOT NULL,
+                daemon_name TEXT NOT NULL,
+                primary_raddress TEXT NOT NULL,
+                source_of_funds TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                progress_json TEXT NOT NULL DEFAULT '{}',
+                step_index INTEGER NOT NULL DEFAULT 0,
+                wait_type TEXT,
+                wait_value TEXT,
+                error_message TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_currency_requests_status ON currency_requests(status)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_uploads (
+                id TEXT PRIMARY KEY,
+                requested_name TEXT NOT NULL,
+                parent_namespace TEXT NOT NULL,
+                identity_fqn TEXT NOT NULL,
+                native_coin TEXT NOT NULL,
+                daemon_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                mime_type TEXT,
+                file_size INTEGER NOT NULL,
+                sha256_hex TEXT NOT NULL,
+                chunk_size_bytes INTEGER NOT NULL DEFAULT 999000,
+                chunk_count INTEGER NOT NULL,
+                current_chunk_index INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TIMESTAMP,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS storage_chunks (
+                id BIGSERIAL PRIMARY KEY,
+                upload_id TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                vdxf_key TEXT NOT NULL,
+                txid TEXT,
+                status TEXT NOT NULL,
+                label TEXT,
+                ivk TEXT,
+                epk TEXT,
+                objectdata_ref_json TEXT,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(upload_id, chunk_index)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_storage_uploads_status ON storage_uploads(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_storage_chunks_upload_id ON storage_chunks(upload_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_storage_chunks_status ON storage_chunks(status)")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_events (
+                id BIGSERIAL PRIMARY KEY,
+                event_name TEXT,
+                signature TEXT,
+                payload_json TEXT NOT NULL,
+                received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at ON webhook_events(received_at)")
+        conn.commit()
+        conn.close()
+        return
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS registrations (
@@ -770,7 +894,7 @@ def _list_webhook_events(limit: int = 20) -> list[dict]:
         """
         SELECT id, event_name, signature, payload_json, received_at
         FROM webhook_events
-        ORDER BY datetime(received_at) DESC, id DESC
+        ORDER BY received_at DESC, id DESC
         LIMIT ?
         """,
         (limit,),
@@ -1012,7 +1136,7 @@ def list_recent_failures(
             created_at
         FROM registrations
         WHERE status = 'failed'
-        ORDER BY datetime(updated_at) DESC
+        ORDER BY updated_at DESC
         LIMIT ?
         """,
         (limit,),

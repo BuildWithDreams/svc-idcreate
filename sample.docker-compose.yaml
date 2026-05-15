@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: syncpass-idcreate-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=idcreate
+      - POSTGRES_USER=idcreate
+      - POSTGRES_PASSWORD=idcreate
+    ports:
+      - "5432:5432"
+    volumes:
+      - idcreate_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U idcreate -d idcreate"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   svc-provisioning:
     build:
       context: ../svc-provisioning
@@ -17,31 +35,37 @@ services:
     image: ${IMAGE_TAG:-registry.syncproof.net/sf/svc-idcreate:latest}
     container_name: syncpass-idcreate-api
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      svc-provisioning:
+        condition: service_started
     ports:
       - "5003:5003"
     env_file:
       - .env
     environment:
       - UV_LINK_MODE=copy
-      - REGISTRAR_DB_PATH=/data/registrar.db
-    volumes:
-      - idcreate_data:/data
+      - DATABASE_URL=${DATABASE_URL:-postgresql://idcreate:idcreate@postgres:5432/idcreate}
     command: uv run fastapi run id_create_service.py --port 5003 --host 0.0.0.0
 
   idcreate-worker:
     image: ${IMAGE_TAG:-registry.syncproof.net/sf/svc-idcreate:latest}
     container_name: syncpass-idcreate-worker
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      idcreate-api:
+        condition: service_started
     env_file:
       - .env
     environment:
       - UV_LINK_MODE=copy
-      - REGISTRAR_DB_PATH=/data/registrar.db
+      - DATABASE_URL=${DATABASE_URL:-postgresql://idcreate:idcreate@postgres:5432/idcreate}
       - WORKER_POLL_INTERVAL_SECONDS=15
-    volumes:
-      - idcreate_data:/data
     command: /bin/sh -c "while true; do uv run python worker.py; sleep ${WORKER_POLL_INTERVAL_SECONDS:-15}; done"
 
 volumes:
-  idcreate_data:
+  idcreate_postgres_data:
 

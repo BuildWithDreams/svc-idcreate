@@ -8,6 +8,7 @@ dependencies = [
     "ecdsa>=0.19.2",
     "fastapi[standard]>=0.128.0",
     "mcp>=1.0.0",
+    "psycopg[binary]>=3.2.9",
     "slick-bitcoinrpc>=0.1.4",
 ]
 

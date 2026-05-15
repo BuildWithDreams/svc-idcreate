@@ -1061,6 +1061,121 @@ def get_registration_status(request_id: str):
     return data
 
 
+def _delete_registration_record(request_id: str) -> bool:
+    conn = _get_db_connection()
+    result = conn.execute("DELETE FROM registrations WHERE id = ?", (request_id,))
+    conn.commit()
+    conn.close()
+    return result.rowcount > 0
+
+
+def _list_registration_records(*, limit: int, statuses: list[str] | None = None) -> list[dict]:
+    conn = _get_db_connection()
+    try:
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    id,
+                    requested_name,
+                    parent_namespace,
+                    native_coin,
+                    daemon_name,
+                    primary_raddress,
+                    referral_id,
+                    status,
+                    rnc_txid,
+                    idr_txid,
+                    attempts,
+                    next_retry_at,
+                    error_message,
+                    webhook_url,
+                    webhook_delivered,
+                    webhook_attempts,
+                    webhook_last_error,
+                    webhook_next_retry_at,
+                    webhook_delivered_at,
+                    updated_at,
+                    created_at
+                FROM registrations
+                WHERE status IN ({placeholders})
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (*statuses, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    id,
+                    requested_name,
+                    parent_namespace,
+                    native_coin,
+                    daemon_name,
+                    primary_raddress,
+                    referral_id,
+                    status,
+                    rnc_txid,
+                    idr_txid,
+                    attempts,
+                    next_retry_at,
+                    error_message,
+                    webhook_url,
+                    webhook_delivered,
+                    webhook_attempts,
+                    webhook_last_error,
+                    webhook_next_retry_at,
+                    webhook_delivered_at,
+                    updated_at,
+                    created_at
+                FROM registrations
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    finally:
+        conn.close()
+
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/registrations", summary="List registration requests for operations")
+def list_registration_requests(
+    limit: int = Query(default=50, ge=1, le=500, description="Maximum number of registration requests to return."),
+    status: str | None = Query(
+        default=None,
+        description="Optional status filter. Provide a single status or comma-separated statuses.",
+    ),
+    api_key: str = Security(_require_api_key),
+):
+    statuses: list[str] | None = None
+    if status is not None:
+        parsed_statuses = [value.strip() for value in status.split(",") if value.strip()]
+        if parsed_statuses:
+            statuses = parsed_statuses
+
+    items = _list_registration_records(limit=limit, statuses=statuses)
+    return {
+        "count": len(items),
+        "items": items,
+    }
+
+
+@app.delete("/api/registration/{request_id}", summary="Delete a registration request by request id")
+def delete_registration_request(request_id: str, api_key: str = Security(_require_api_key)):
+    deleted = _delete_registration_record(request_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    return {
+        "request_id": request_id,
+        "status": "deleted",
+    }
+
+
 @app.post("/api/webhook/requeue/{request_id}", summary="Requeue webhook delivery for a terminal request")
 def requeue_webhook_delivery(request_id: str, api_key: str = Security(_require_api_key)):
     """

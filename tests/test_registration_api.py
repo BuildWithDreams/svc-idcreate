@@ -13,8 +13,13 @@ import id_create_service
 
 class _FakeRpcConnection:
     last_referral_id = None
+    register_name_commitment_calls = 0
+
+    def get_identity(self, identity_name_or_id):
+        raise Exception(f"Identity not found: {identity_name_or_id}")
 
     def register_name_commitment(self, name, primary_raddress, referral_id, parent, source_of_funds):
+        _FakeRpcConnection.register_name_commitment_calls += 1
         _FakeRpcConnection.last_referral_id = referral_id
         return {
             "txid": "txid-rnc-123",
@@ -23,6 +28,11 @@ class _FakeRpcConnection:
                 "salt": "abc123",
             },
         }
+
+
+class _ExistingIdentityRpcConnection(_FakeRpcConnection):
+    def get_identity(self, identity_name_or_id):
+        return {"name": identity_name_or_id, "identityaddress": "i" * 40}
 
 
 def _build_client(monkeypatch, tmp_path):
@@ -41,6 +51,7 @@ def _build_client(monkeypatch, tmp_path):
 def test_register_happy_path(monkeypatch, tmp_path):
     client = next(_build_client(monkeypatch, tmp_path))
     _FakeRpcConnection.last_referral_id = None
+    _FakeRpcConnection.register_name_commitment_calls = 0
 
     payload = {
         "name": "alice",
@@ -59,6 +70,29 @@ def test_register_happy_path(monkeypatch, tmp_path):
     assert data["status"] == "pending_rnc_confirm"
     assert data["request_id"]
     assert _FakeRpcConnection.last_referral_id == ""
+    assert _FakeRpcConnection.register_name_commitment_calls == 1
+
+
+def test_register_rejects_when_identity_already_exists(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    _FakeRpcConnection.register_name_commitment_calls = 0
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _ExistingIdentityRpcConnection())
+
+    payload = {
+        "name": "alice",
+        "parent": "bitcoins.vrsc",
+        "native_coin": "VRSC",
+        "primary_raddress": "RaliceAddress",
+    }
+    resp = client.post(
+        "/api/register",
+        json=payload,
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 409
+    assert "Identity already exists" in str(resp.json())
+    assert _FakeRpcConnection.register_name_commitment_calls == 0
 
 
 def test_register_passes_and_persists_referral_id(monkeypatch, tmp_path):
@@ -357,3 +391,71 @@ def test_recent_failures_returns_latest_failed_records(monkeypatch, tmp_path):
     assert len(data["items"]) == 1
     assert data["items"][0]["id"] == second
     assert data["items"][0]["error_message"] == "second failed"
+
+
+def test_list_registrations_requires_api_key(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.get("/api/registrations")
+    assert resp.status_code == 403
+
+
+def test_list_registrations_returns_items_and_status_filter(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    request_id = client.post(
+        "/api/register",
+        json={
+            "name": "alice",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RaliceAddress",
+        },
+        headers={"X-API-Key": "test-key"},
+    ).json()["request_id"]
+
+    resp = client.get(
+        "/api/registrations?status=pending_rnc_confirm&limit=20",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert all(item["status"] == "pending_rnc_confirm" for item in data["items"])
+    assert any(item["id"] == request_id for item in data["items"])
+
+
+def test_delete_registration_by_request_id(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    request_id = client.post(
+        "/api/register",
+        json={
+            "name": "alice",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RaliceAddress",
+        },
+        headers={"X-API-Key": "test-key"},
+    ).json()["request_id"]
+
+    delete_resp = client.delete(
+        f"/api/registration/{request_id}",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["request_id"] == request_id
+    assert delete_resp.json()["status"] == "deleted"
+
+    status_resp = client.get(f"/api/status/{request_id}")
+    assert status_resp.status_code == 404
+
+
+def test_delete_registration_returns_404_for_unknown_id(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    delete_resp = client.delete(
+        "/api/registration/not-found",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert delete_resp.status_code == 404

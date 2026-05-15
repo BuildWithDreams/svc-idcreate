@@ -36,6 +36,30 @@ def register_identity(request, svc):
         daemon_name,
     )
 
+    full_identity_name = f"{request.name}.{request.parent}"
+    try:
+        rpc_connection = svc._get_rpc_connection(daemon_name)
+        existing_identity = rpc_connection.get_identity(full_identity_name)
+        if isinstance(existing_identity, dict) and bool(existing_identity):
+            svc.logger.warning(
+                "api.register.identity_exists name=%s parent=%s full_identity_name=%s",
+                request.name,
+                request.parent,
+                full_identity_name,
+            )
+            raise svc.HTTPException(status_code=409, detail=f"Identity already exists: {full_identity_name}")
+    except svc.HTTPException:
+        raise
+    except Exception as exc:
+        # For non-existent IDs, get_identity usually raises; proceed with registration flow.
+        svc.logger.info(
+            "api.register.identity_precheck_not_found name=%s parent=%s full_identity_name=%s error=%s",
+            request.name,
+            request.parent,
+            full_identity_name,
+            exc,
+        )
+
     source_of_funds = svc.os.getenv("SOURCE_OF_FUNDS", "").strip()
     if not source_of_funds:
         svc.logger.error("api.register.source_of_funds_missing daemon=%s", daemon_name)
@@ -85,7 +109,6 @@ def register_identity(request, svc):
                 }
             ),
         )
-        rpc_connection = svc._get_rpc_connection(daemon_name)
         rnc_response = rpc_connection.register_name_commitment(
             request.name,
             source_of_funds,

@@ -1,6 +1,8 @@
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
@@ -422,6 +424,124 @@ def test_plan_endpoint_accepts_mixed_case_fractional_token_mode(monkeypatch, tmp
 
     assert resp.status_code == 202
     assert resp.json()["workflow_type"] == "fractional_token"
+
+
+def test_plan_endpoint_fractional_persists_valid_option_passthrough(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.post(
+        "/api/currency/plan",
+        json={
+            "name": "DPNK",
+            "parent": "VRSCTEST",
+            "native_coin": "VRSCTEST",
+            "primary_raddress": "RtestAddress",
+            "mode": "fractional",
+            "fractional": {
+                "initial_supply": 325000,
+                "id_registration_fees": 50,
+                "id_referral_levels": 0,
+                "start_block": 28000,
+                "define_options": 41,
+                "reserve_options": 40,
+                "native": {
+                    "name": "VRSCTEST",
+                    "weight": 0.55,
+                    "initial_contribution": 20,
+                },
+                "reserves": [],
+                "create_reserves": False,
+                "identity_exists": False,
+            },
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 202
+    request_id = resp.json()["request_id"]
+
+    status_resp = client.get(f"/api/currency/status/{request_id}")
+    assert status_resp.status_code == 200
+    payload = status_resp.json()["payload"]
+    assert payload["define_options"] == 41
+    assert payload["reserve_options"] == 40
+
+
+def test_simple_currency_rejects_unsupported_define_options(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.post(
+        "/api/currency/simple",
+        json={
+            "name": "TENNIS",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RtestAddress",
+            "pre_allocation_id": "blockoneminer@",
+            "pre_allocation_amount": 80000,
+            "define_options": 34,
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 422
+    assert "supported values: 32, 33, 40, 41" in str(resp.json())
+
+
+def test_plan_endpoint_fractional_rejects_unsupported_option_bits(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.post(
+        "/api/currency/plan",
+        json={
+            "name": "DPNK",
+            "parent": "VRSCTEST",
+            "native_coin": "VRSCTEST",
+            "primary_raddress": "RtestAddress",
+            "mode": "fractional",
+            "fractional": {
+                "initial_supply": 325000,
+                "id_registration_fees": 50,
+                "id_referral_levels": 0,
+                "start_block": 28000,
+                "define_options": 34,
+                "reserve_options": 32,
+                "native": {
+                    "name": "VRSCTEST",
+                    "weight": 0.55,
+                    "initial_contribution": 20,
+                },
+                "reserves": [],
+                "create_reserves": False,
+            },
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 422
+    assert "supported values: 32, 33, 40, 41" in str(resp.json())
+
+
+def test_validate_currency_options_helper_accepts_supported_values():
+    for value in (32, 33, 40, 41):
+        assert id_create_service._validate_currency_options(value, field_name="define_options") == value
+
+
+def test_validate_currency_options_helper_rejects_unsupported_values():
+    invalid_values = (
+        -1,   # negative values are not allowed
+        0,    # TOKEN bit missing
+        1,    # FRACTIONAL without TOKEN
+        8,    # REFERRALS without TOKEN
+        34,   # includes unsupported ISSUANCE bit (0x02)
+        36,   # includes unsupported STAKING bit (0x04)
+        42,   # includes unsupported ISSUANCE bit (0x02)
+        96,   # includes unsupported GATEWAY bit (0x80)
+    )
+
+    for value in invalid_values:
+        with pytest.raises(ValueError):
+            id_create_service._validate_currency_options(value, field_name="define_options")
 
 
 def test_plan_template_endpoint_auto_mode(monkeypatch, tmp_path):

@@ -81,6 +81,8 @@ def enqueue_fractional_currency_request(
         "reserves": [reserve.model_dump() for reserve in plan.reserves],
         "allocation_id": plan.allocation_id,
         "define_funding_amount": plan.define_funding_amount,
+        "define_options": plan.define_options,
+        "reserve_options": plan.reserve_options,
         "create_reserves": plan.create_reserves,
         "identity_exists": plan.identity_exists,
     }
@@ -119,6 +121,8 @@ def currency_plan_template(mode: str = "auto") -> dict:
         "id_registration_fees": 50,
         "id_referral_levels": 0,
         "start_block": 28000,
+        "define_options": 33,
+        "reserve_options": 32,
         "native": {
             "name": "VRSCTEST",
             "weight": 0.5,
@@ -214,6 +218,8 @@ def create_fractional_currency(request, svc):
         reserves=request.reserves,
         allocation_id=request.allocation_id,
         define_funding_amount=request.define_funding_amount,
+        define_options=request.define_options,
+        reserve_options=request.reserve_options,
         create_reserves=request.create_reserves,
         identity_exists=request.identity_exists,
     )

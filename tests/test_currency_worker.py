@@ -87,6 +87,7 @@ class _FakeFractionalReserveIdentityExistsRpc:
         self.sent_calls = []
         self.reserve_rnc_calls = []
         self.reserve_register_calls = []
+        self.reserve_define_options = []
         self.balances = {
             "RtestAddress": {
                 "VRSCTEST": 1000.0,
@@ -135,6 +136,7 @@ class _FakeFractionalReserveIdentityExistsRpc:
         return "c" * 64
 
     def define_simple_token_currency(self, options, name, id_registration_fees, pre_allocations, proof_protocol):
+        self.reserve_define_options.append(options)
         if pre_allocations and isinstance(pre_allocations[0], dict):
             for alloc_identity, amount in pre_allocations[0].items():
                 alloc_balances = self.balances.setdefault(alloc_identity, {})
@@ -598,6 +600,7 @@ def test_worker_fractional_skips_reserve_identity_creation_when_identity_exists(
                     "id_registration_fees": 777,
                     "id_referral_levels": 3,
                     "start_block": 1057000,
+                    "reserve_options": 40,
                     "native": {
                         "name": "VRSCTEST",
                         "weight": 0.55,
@@ -643,6 +646,7 @@ def test_worker_fractional_skips_reserve_identity_creation_when_identity_exists(
     reserve_contribution_calls = [call for call in fake_rpc.sent_calls if call[1] == "SPORTS" and call[2] == "DPNK@"]
     assert reserve_contribution_calls
     assert all(call[0] == "blockoneminer@" for call in reserve_contribution_calls)
+    assert fake_rpc.reserve_define_options == [40]
 
 
 def test_worker_fractional_skips_main_identity_creation_when_identity_exists(monkeypatch, tmp_path):
@@ -792,6 +796,7 @@ def test_worker_fractional_prepare_false_still_funds_definecurrency(monkeypatch,
                     "id_registration_fees": 777,
                     "id_referral_levels": 3,
                     "start_block": 1057000,
+                    "define_options": 41,
                     "native": {
                         "name": "VRSCTEST",
                         "weight": 0.55,
@@ -831,6 +836,8 @@ def test_worker_fractional_prepare_false_still_funds_definecurrency(monkeypatch,
     ]
     assert native_calls
     assert any(call[3] >= 200.001 for call in native_calls)
+    assert fake_rpc.last_define_options is not None
+    assert fake_rpc.last_define_options["options"] == 41
 
 
 def test_worker_fractional_submits_all_contribution_sends_in_one_sweep(monkeypatch, tmp_path):

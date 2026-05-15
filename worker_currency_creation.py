@@ -899,13 +899,14 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
         return
 
     if reserve_phase == 3:
+        reserve_options = payload.get("reserve_options", 32)
         logger.info(
             "currency.rpc.define_simple_token_currency.submit request_id=%s reserve=%s params=%s",
             row["id"],
             reserve_name,
             _safe_log_json(
                 {
-                    "options": 32,
+                    "options": reserve_options,
                     "name": reserve_name,
                     "id_registration_fees": payload.get("id_registration_fees", 50),
                     "pre_allocations": [{payload["allocation_id"]: reserve["supply"]}],
@@ -914,7 +915,7 @@ def _process_fractional_reserve_step(conn: sqlite3.Connection, row: sqlite3.Row,
             ),
         )
         txid = rpc.define_simple_token_currency(
-            32,
+            reserve_options,
             reserve_name,
             payload.get("id_registration_fees", 50),
             [{payload["allocation_id"]: reserve["supply"]}],
@@ -1441,9 +1442,10 @@ def _process_currency_fractional_step(conn: sqlite3.Connection, row: sqlite3.Row
             _safe_log_json(initial_contributions),
         )
 
+        define_options = payload.get("define_options", 33)
         options = {
             "name": name,
-            "options": 33,
+            "options": define_options,
             "idregistrationfees": payload["id_registration_fees"],
             "idreferrallevels": payload["id_referral_levels"],
             "startblock": payload["start_block"],

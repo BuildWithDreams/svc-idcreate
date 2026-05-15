@@ -33,6 +33,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+OPTION_FRACTIONAL = 0x01
+OPTION_REFERRALS = 0x08
+OPTION_TOKEN = 0x20
+SUPPORTED_CURRENCY_OPTIONS_MASK = OPTION_TOKEN | OPTION_FRACTIONAL | OPTION_REFERRALS
+REQUIRED_CURRENCY_OPTIONS_MASK = OPTION_TOKEN
+SUPPORTED_CURRENCY_OPTION_VALUES = (32, 33, 40, 41)
+
+
 def _log_json(data) -> str:
     return shared_functions.log_json(data)
 
@@ -43,6 +51,22 @@ def _redact_fields(data: dict, redacted_keys: set[str] | None = None) -> dict:
 
 def _mask_value(value: str) -> str:
     return shared_functions.mask_value(value)
+
+
+def _validate_currency_options(options: int, *, field_name: str) -> int:
+    if options < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+
+    unsupported_bits = options & ~SUPPORTED_CURRENCY_OPTIONS_MASK
+    has_required_bits = (options & REQUIRED_CURRENCY_OPTIONS_MASK) == REQUIRED_CURRENCY_OPTIONS_MASK
+
+    if unsupported_bits or not has_required_bits:
+        raise ValueError(
+            f"{field_name} must include TOKEN(32) and may only combine FRACTIONAL(1) and REFERRALS(8); "
+            f"supported values: {', '.join(str(value) for value in SUPPORTED_CURRENCY_OPTION_VALUES)}"
+        )
+
+    return options
 
 
 class RegisterRequest(BaseModel):
@@ -110,6 +134,11 @@ class CreateSimpleCurrencyRequest(BaseModel):
     define_options: int = Field(default=32, description="Currency options field for simple token definition.")
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to <name>@ before definecurrency.")
 
+    @model_validator(mode="after")
+    def _validate_define_options(self):
+        _validate_currency_options(self.define_options, field_name="define_options")
+        return self
+
 
 class CreateFractionalCurrencyRequest(BaseModel):
     name: str = Field(description="Fractional currency/identity name without parent namespace.", examples=["SIXTH"])
@@ -129,6 +158,8 @@ class CreateFractionalCurrencyRequest(BaseModel):
     reserves: list[ReserveCurrencySpec] = Field(default_factory=list, description="Reserve token definitions.")
     allocation_id: str = Field(default="blockoneminer@", description="Identity used for reserve preallocations and reserve funding.")
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
+    define_options: int = Field(default=33, description="Currency options field for fractional definecurrency payload.")
+    reserve_options: int = Field(default=32, description="Currency options field used when defining reserve token currencies.")
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
     identity_exists: bool = Field(
         default=False,
@@ -144,6 +175,8 @@ class CreateFractionalCurrencyRequest(BaseModel):
                 raise ValueError(
                     f"fractional.reserves[].supply is required when create_reserves is true (missing for: {names})"
                 )
+        _validate_currency_options(self.define_options, field_name="define_options")
+        _validate_currency_options(self.reserve_options, field_name="reserve_options")
         return self
 
 
@@ -154,6 +187,11 @@ class CurrencySimplePlan(BaseModel):
     proof_protocol: int = Field(default=1, description="Proof protocol for definecurrency payload.")
     define_options: int = Field(default=32, description="Currency options field for simple token definition.")
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to <name>@ before definecurrency.")
+
+    @model_validator(mode="after")
+    def _validate_define_options(self):
+        _validate_currency_options(self.define_options, field_name="define_options")
+        return self
 
 
 class CurrencyFractionalPlan(BaseModel):
@@ -170,6 +208,8 @@ class CurrencyFractionalPlan(BaseModel):
     reserves: list[ReserveCurrencySpec] = Field(default_factory=list, description="Reserve token definitions.")
     allocation_id: str = Field(default="blockoneminer@", description="Identity used for reserve preallocations and reserve funding.")
     define_funding_amount: float = Field(default=200.001, description="Native coin funding sent to identities before definecurrency.")
+    define_options: int = Field(default=33, description="Currency options field for fractional definecurrency payload.")
+    reserve_options: int = Field(default=32, description="Currency options field used when defining reserve token currencies.")
     create_reserves: bool = Field(default=True, description="If true, create reserve token currencies before defining fractional.")
     identity_exists: bool = Field(
         default=False,
@@ -185,6 +225,8 @@ class CurrencyFractionalPlan(BaseModel):
                 raise ValueError(
                     f"fractional.reserves[].supply is required when create_reserves is true (missing for: {names})"
                 )
+        _validate_currency_options(self.define_options, field_name="define_options")
+        _validate_currency_options(self.reserve_options, field_name="reserve_options")
         return self
 
 

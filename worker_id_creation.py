@@ -83,7 +83,7 @@ def process_identity_once(
         FROM registrations
         WHERE status IN ('complete', 'failed')
           AND webhook_url IS NOT NULL
-          AND webhook_delivered = 0
+                    AND webhook_delivered = FALSE
           AND (webhook_next_retry_at IS NULL OR webhook_next_retry_at <= CURRENT_TIMESTAMP)
         """
     ).fetchall()
@@ -319,7 +319,7 @@ def process_identity_once(
             conn.execute(
                 """
                 UPDATE registrations
-                SET webhook_delivered = 1,
+                SET webhook_delivered = TRUE,
                     webhook_attempts = webhook_attempts + 1,
                     webhook_last_error = NULL,
                     webhook_next_retry_at = NULL,

@@ -1089,7 +1089,7 @@ def requeue_webhook_delivery(request_id: str, api_key: str = Security(_require_a
     conn.execute(
         """
         UPDATE registrations
-        SET webhook_delivered = 0,
+        SET webhook_delivered = FALSE,
             webhook_attempts = 0,
             webhook_last_error = NULL,
             webhook_next_retry_at = NULL,

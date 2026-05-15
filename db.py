@@ -15,7 +15,7 @@ _QMARK_PATTERN = re.compile(r"\?")
 
 
 def is_postgres_enabled() -> bool:
-    database_url = os.getenv("DATABASE_URL", "").strip().lower()
+    database_url = os.getenv("DATABASE_URL", "").strip().strip('"').strip("'").lower()
     return database_url.startswith("postgres://") or database_url.startswith("postgresql://")
 
 
@@ -62,7 +62,7 @@ def get_db_connection(sqlite_path: str) -> Any:
     if is_postgres_enabled():
         if psycopg is None:
             raise RuntimeError("DATABASE_URL is set for PostgreSQL but psycopg is not installed")
-        database_url = os.getenv("DATABASE_URL", "").strip()
+        database_url = os.getenv("DATABASE_URL", "").strip().strip('"').strip("'")
         if not database_url:
             raise RuntimeError("DATABASE_URL must be set when PostgreSQL is enabled")
         conn = psycopg.connect(database_url, row_factory=dict_row)

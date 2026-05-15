@@ -35,6 +35,14 @@ class _FakeRpcIdentityTimeout:
         raise Exception("connection timeout")
 
 
+class _FakeRpcIdentityAlreadyExists:
+    def register_identity(self, json_namecommitment_response, json_identity, source_of_funds, fee_offer=80):
+        raise Exception("Error with registering identity: registeridentity: Identity already exists. (code -27)")
+
+    def get_currency(self, currency_name_or_id):
+        return {"idregistrationfees": 25}
+
+
 class _FakeRpcIdentityCapture:
     def __init__(self, fee=1.25):
         self.fee = fee
@@ -596,6 +604,25 @@ def test_worker_schedules_retry_on_transient_id_registration_error(monkeypatch, 
     assert row[1] == 1
     assert "connection timeout" in row[2]
     assert row[3] is not None
+
+
+def test_worker_marks_complete_when_id_already_exists_on_ready_for_idr(monkeypatch, tmp_path):
+    _seed_ready_for_idr(monkeypatch, tmp_path)
+    monkeypatch.setattr(worker, "_get_rpc_connection", lambda _: _FakeRpcIdentityAlreadyExists())
+
+    updated = worker.process_once()
+
+    assert updated == 1
+    conn = sqlite3.connect(str(tmp_path / "registrar.db"))
+    row = conn.execute(
+        "SELECT status, attempts, next_retry_at, error_message FROM registrations WHERE id = ?",
+        ("req-2",),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "complete"
+    assert row[1] == 0
+    assert row[2] is None
+    assert row[3] is None
 
 
 def test_worker_marks_failed_after_max_retry_attempts(monkeypatch, tmp_path):

@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sqlite3
+from datetime import datetime, timedelta, UTC
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Any, Callable
 
@@ -83,7 +84,7 @@ def _retry_config() -> tuple[int, int]:
 
 
 def _next_retry_timestamp(delay_seconds: int) -> str:
-    return f"now + {delay_seconds} seconds"
+    return (datetime.now(UTC) + timedelta(seconds=delay_seconds)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _record_currency_retry_or_failure(conn: sqlite3.Connection, row_id: str, attempts: int, error: str, status: str):

@@ -16,6 +16,11 @@ def _is_insufficient_identity_registration_error(exc: Exception) -> bool:
     return "insufficient funds for identity registration" in message or "(code -8)" in message
 
 
+def _is_identity_already_exists_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "identity already exists" in message or "(code -27)" in message or "already in chain" in message
+
+
 def process_identity_once(
     *,
     get_db_connection: Callable[[], sqlite3.Connection],
@@ -217,13 +222,30 @@ def process_identity_once(
                 ("idr_submitted", txid, row["id"]),
             )
         except Exception as exc:
-            logger.exception(
-                "worker.process_once.ready_for_idr.submit_error request_id=%s daemon=%s full_name=%s",
-                row["id"],
-                row["daemon_name"],
-                full_name,
-            )
-            record_retry_or_failure(conn, row["id"], row["attempts"], str(exc), "ready_for_idr")
+            if _is_identity_already_exists_error(exc):
+                logger.warning(
+                    "worker.process_once.ready_for_idr.already_exists request_id=%s daemon=%s full_name=%s action=mark_complete error=%s",
+                    row["id"],
+                    row["daemon_name"],
+                    full_name,
+                    str(exc),
+                )
+                conn.execute(
+                    """
+                    UPDATE registrations
+                    SET status = ?, attempts = 0, error_message = NULL, next_retry_at = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    ("complete", row["id"]),
+                )
+            else:
+                logger.exception(
+                    "worker.process_once.ready_for_idr.submit_error request_id=%s daemon=%s full_name=%s",
+                    row["id"],
+                    row["daemon_name"],
+                    full_name,
+                )
+                record_retry_or_failure(conn, row["id"], row["attempts"], str(exc), "ready_for_idr")
         updated_count += 1
 
     for row in submitted_rows:

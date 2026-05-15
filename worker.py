@@ -4,6 +4,7 @@ import os
 import hmac
 import hashlib
 import logging
+from datetime import datetime, timedelta, UTC
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from urllib import request as urllib_request
 from typing import Any
@@ -57,7 +58,7 @@ def _retry_config() -> tuple[int, int]:
 
 
 def _next_retry_timestamp(delay_seconds: int) -> str:
-    return f"now + {delay_seconds} seconds"
+    return (datetime.now(UTC) + timedelta(seconds=delay_seconds)).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _record_retry_or_failure(conn: sqlite3.Connection, row_id: str, attempts: int, error: str, status: str):

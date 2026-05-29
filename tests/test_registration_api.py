@@ -40,6 +40,11 @@ class _DegradedRpcConnection(_FakeRpcConnection):
         raise Exception("RPC connection refused")
 
 
+class _Code5NotFoundRpcConnection(_FakeRpcConnection):
+    def get_identity(self, identity_name_or_id):
+        raise Exception({"code": -5, "message": f"Identity not found: {identity_name_or_id}"})
+
+
 def _build_client(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
@@ -227,6 +232,35 @@ def test_register_and_availability_share_canonical_fqn(monkeypatch, tmp_path):
 
     assert register_resp.status_code == 409
     assert fqn in str(register_resp.json())
+
+
+def test_code5_not_found_shape_is_treated_as_available_and_registration_proceeds(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    _FakeRpcConnection.register_name_commitment_calls = 0
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _Code5NotFoundRpcConnection())
+
+    availability_resp = client.get(
+        "/api/check-availability?name=alice&parent=bitcoins.vrsc&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert availability_resp.status_code == 200
+    availability_data = availability_resp.json()
+    assert availability_data["available"] is True
+    assert availability_data["fully_qualified_name"] == "alice.bitcoins.vrsc@"
+    assert availability_data["reason"] is None
+
+    register_resp = client.post(
+        "/api/register",
+        json={
+            "name": "alice",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RaliceAddress",
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+    assert register_resp.status_code == 202
+    assert _FakeRpcConnection.register_name_commitment_calls == 1
 
 
 def test_register_passes_and_persists_referral_id(monkeypatch, tmp_path):

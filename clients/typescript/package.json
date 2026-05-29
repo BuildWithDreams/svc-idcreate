@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "example": "tsx examples/createAndPoll.ts"
+    "example": "tsx examples/createAndPoll.ts",
+    "test": "tsx --test tests/client.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",

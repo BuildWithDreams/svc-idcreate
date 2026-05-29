@@ -85,6 +85,22 @@ class IdCreateClient:
             payload["webhook_secret"] = webhook_secret
         return self._request("POST", "/api/register", payload)
 
+    def check_identity_availability(
+        self,
+        name: str,
+        native_coin: str,
+        parent: str | None = None,
+    ) -> dict[str, Any]:
+        query_params: dict[str, str] = {
+            "name": name,
+            "native_coin": native_coin,
+        }
+        if parent is not None:
+            query_params["parent"] = parent
+
+        query = urllib_parse.urlencode(query_params)
+        return self._request("GET", f"/api/check-availability?{query}")
+
     def get_identity_request_status(self, request_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/status/{request_id}")
 

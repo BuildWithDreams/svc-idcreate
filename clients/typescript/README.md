@@ -5,6 +5,7 @@ Thin client for the identity creation service.
 ## Features
 
 - health check
+- check identity availability
 - create identity request
 - status lookup
 - list recent failures
@@ -18,6 +19,17 @@ import { IdCreateClient } from "./src/client";
 const client = new IdCreateClient("http://localhost:5003", "key1");
 
 async function run() {
+  const availability = await client.checkIdentityAvailability({
+    name: "alice",
+    parent: "bitcoins.vrsc",
+    native_coin: "VRSC",
+  });
+
+  if (!availability.available) {
+    console.log(`Unavailable: ${availability.fully_qualified_name}`);
+    return;
+  }
+
   const created = await client.createIdentity({
     name: "alice",
     parent: "bitcoins.vrsc",

@@ -35,6 +35,11 @@ class _ExistingIdentityRpcConnection(_FakeRpcConnection):
         return {"name": identity_name_or_id, "identityaddress": "i" * 40}
 
 
+class _DegradedRpcConnection(_FakeRpcConnection):
+    def get_identity(self, identity_name_or_id):
+        raise Exception("RPC connection refused")
+
+
 def _build_client(monkeypatch, tmp_path):
     db_path = tmp_path / "registrar.db"
     monkeypatch.setenv("REGISTRAR_DB_PATH", str(db_path))
@@ -93,6 +98,135 @@ def test_register_rejects_when_identity_already_exists(monkeypatch, tmp_path):
     assert resp.status_code == 409
     assert "Identity already exists" in str(resp.json())
     assert _FakeRpcConnection.register_name_commitment_calls == 0
+
+
+def test_check_availability_returns_available_true_for_not_found(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.get(
+        "/api/check-availability?name=alice&parent=bitcoins.vrsc&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["reason"] is None
+    assert data["fully_qualified_name"] == "alice.bitcoins.vrsc@"
+
+
+def test_check_availability_returns_available_false_for_existing_identity(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _ExistingIdentityRpcConnection())
+
+    resp = client.get(
+        "/api/check-availability?name=alice&parent=bitcoins.vrsc&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is False
+    assert data["reason"] == "Identity already exists"
+    assert data["fully_qualified_name"] == "alice.bitcoins.vrsc@"
+
+
+def test_check_availability_requires_api_key(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.get("/api/check-availability?name=alice&parent=bitcoins.vrsc&native_coin=VRSC")
+    assert resp.status_code == 403
+
+
+def test_check_availability_returns_503_for_unknown_native_coin(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_resolve_daemon_by_native_coin", lambda _: None)
+
+    resp = client.get(
+        "/api/check-availability?name=alice&parent=bitcoins.vrsc&native_coin=UNKNOWN",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 503
+
+
+def test_check_availability_returns_503_for_rpc_degradation(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _DegradedRpcConnection())
+
+    resp = client.get(
+        "/api/check-availability?name=alice&parent=bitcoins.vrsc&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 503
+    assert "Identity node unreachable or degraded" in str(resp.json())
+
+
+def test_check_availability_rejects_parent_not_in_allowlist(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setenv("REGISTRAR_ALLOWED_PARENTS", "bitcoins.vrsc,private.vrsc")
+
+    resp = client.get(
+        "/api/check-availability?name=alice&parent=untrusted.vrsc&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["requested_parent"] == "untrusted.vrsc"
+    assert "bitcoins.vrsc" in detail["allowed_parents"]
+
+
+def test_check_availability_accepts_parent_with_trailing_at_when_allowlisted(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setenv("REGISTRAR_ALLOWED_PARENTS", "bitcoins.vrsc")
+
+    resp = client.get(
+        "/api/check-availability?name=alice&parent=bitcoins.vrsc@&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["fully_qualified_name"] == "alice.bitcoins.vrsc@"
+
+
+def test_check_availability_supports_root_id_when_parent_omitted(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+
+    resp = client.get(
+        "/api/check-availability?name=alice&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["fully_qualified_name"] == "alice@"
+
+
+def test_register_and_availability_share_canonical_fqn(monkeypatch, tmp_path):
+    client = next(_build_client(monkeypatch, tmp_path))
+    monkeypatch.setattr(id_create_service, "_get_rpc_connection", lambda _: _ExistingIdentityRpcConnection())
+
+    availability_resp = client.get(
+        "/api/check-availability?name=alice&parent=bitcoins.vrsc&native_coin=VRSC",
+        headers={"X-API-Key": "test-key"},
+    )
+    assert availability_resp.status_code == 200
+    fqn = availability_resp.json()["fully_qualified_name"]
+
+    register_resp = client.post(
+        "/api/register",
+        json={
+            "name": "alice",
+            "parent": "bitcoins.vrsc",
+            "native_coin": "VRSC",
+            "primary_raddress": "RaliceAddress",
+        },
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert register_resp.status_code == 409
+    assert fqn in str(register_resp.json())
 
 
 def test_register_passes_and_persists_referral_id(monkeypatch, tmp_path):

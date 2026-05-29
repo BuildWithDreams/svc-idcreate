@@ -32,7 +32,46 @@ def mask_value(value: str) -> str:
 
 
 def normalize_parent_namespace(value: str) -> str:
-    return value.strip().lower()
+    return value.strip().lower().rstrip("@").strip()
+
+
+def canonicalize_parent_namespace(value: str) -> str:
+    parent = value.strip().rstrip("@").strip()
+    if not parent:
+        raise ValueError("parent must not be empty")
+    return f"{parent}@"
+
+
+def build_identity_fqn(name: str, parent: str | None) -> str:
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise ValueError("name must not be empty")
+
+    if parent is None or not parent.strip():
+        return f"{normalized_name}@"
+
+    normalized_parent = canonicalize_parent_namespace(parent)
+    return f"{normalized_name}.{normalized_parent}"
+
+
+def classify_getidentity_not_found(error: Exception) -> bool:
+    args = getattr(error, "args", ())
+    for arg in args:
+        if isinstance(arg, dict):
+            code = arg.get("code")
+            if code == -5:
+                return True
+            message = str(arg.get("message", "")).lower()
+            if "identity" in message and "not found" in message:
+                return True
+
+    lowered = str(error).lower()
+    not_found_markers = (
+        "identity not found",
+        "error with get identity",
+        "id not found",
+    )
+    return any(marker in lowered for marker in not_found_markers) and "not found" in lowered
 
 
 def allowed_parent_namespaces() -> set[str]:

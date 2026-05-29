@@ -91,6 +91,12 @@ class RegisterRequest(BaseModel):
     )
 
 
+class AvailabilityResponse(BaseModel):
+    available: bool
+    fully_qualified_name: str
+    reason: str | None = None
+
+
 class StorageUploadRequest(BaseModel):
     name: str
     parent: str
@@ -870,6 +876,14 @@ def _normalize_parent_namespace(value: str) -> str:
     return shared_functions.normalize_parent_namespace(value)
 
 
+def _build_identity_fqn(name: str, parent: str | None) -> str:
+    return shared_functions.build_identity_fqn(name, parent)
+
+
+def _classify_getidentity_not_found(error: Exception) -> bool:
+    return shared_functions.classify_getidentity_not_found(error)
+
+
 def _allowed_parent_namespaces() -> set[str]:
     return shared_functions.allowed_parent_namespaces()
 
@@ -1039,6 +1053,68 @@ def health_check(
 @app.post("/api/register", status_code=202, summary="Start asynchronous ID registration")
 def register_identity(request: RegisterRequest, api_key: str = Security(_require_api_key)):
     return services.register_identity(request)
+
+
+@app.get("/api/check-availability", response_model=AvailabilityResponse, summary="Check identity availability")
+def check_identity_availability(
+    name: str = Query(..., description="Identity or sub-ID name to check."),
+    parent: str | None = Query(default=None, description="Optional parent namespace."),
+    native_coin: str = Query(..., description="Native coin ticker used to resolve daemon."),
+    api_key: str = Security(_require_api_key),
+):
+    """Check whether an identity is available on-chain for the resolved daemon."""
+    try:
+        full_identity_name = _build_identity_fqn(name, parent)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    daemon_name = _resolve_daemon_by_native_coin(native_coin)
+    if daemon_name is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "native_coin": native_coin,
+                "error": "No enabled daemon configured for requested native coin.",
+            },
+        )
+
+    if parent is not None and parent.strip():
+        allowed_parents = _allowed_parent_namespaces()
+        parent_normalized = _normalize_parent_namespace(parent)
+        if allowed_parents and parent_normalized not in allowed_parents:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "Requested parent namespace is not permitted.",
+                    "requested_parent": parent,
+                    "allowed_parents": sorted(allowed_parents),
+                },
+            )
+
+    try:
+        rpc_connection = _get_rpc_connection(daemon_name)
+        existing_identity = rpc_connection.get_identity(full_identity_name)
+        if existing_identity:
+            return AvailabilityResponse(
+                available=False,
+                fully_qualified_name=full_identity_name,
+                reason="Identity already exists",
+            )
+    except Exception as exc:
+        if _classify_getidentity_not_found(exc):
+            return AvailabilityResponse(
+                available=True,
+                fully_qualified_name=full_identity_name,
+                reason=None,
+            )
+        raise HTTPException(status_code=503, detail="Identity node unreachable or degraded")
+
+    return AvailabilityResponse(
+        available=False,
+        fully_qualified_name=full_identity_name,
+        reason="Identity already exists",
+    )
 
 
 @app.get("/api/status/{request_id}", summary="Get registration request status")

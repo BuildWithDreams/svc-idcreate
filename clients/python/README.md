@@ -5,6 +5,7 @@ Thin client for the identity creation service.
 ## Features
 
 - health check
+- check identity availability
 - create identity request
 - status lookup
 - list recent failures
@@ -26,6 +27,15 @@ client = IdCreateClient(
 )
 
 try:
+    availability = client.check_identity_availability(
+        name="alice",
+        parent="bitcoins.vrsc",
+        native_coin="VRSC",
+    )
+    if not availability["available"]:
+        print("Name unavailable:", availability["fully_qualified_name"])
+        raise SystemExit(1)
+
     created = client.create_identity(
         name="alice",
         parent="bitcoins.vrsc",

@@ -55,6 +55,58 @@ def test_create_identity_sends_expected_payload_and_headers(monkeypatch):
     assert captured["body"]["webhook_url"] == "https://example.com/hook"
 
 
+def test_check_identity_availability_hits_expected_path_and_headers(monkeypatch):
+    captured = {}
+
+    def _fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        captured["timeout"] = timeout
+        captured["headers"] = dict(req.header_items())
+        return _FakeResponse(
+            {
+                "available": True,
+                "fully_qualified_name": "alice.bitcoins.vrsc@",
+                "reason": None,
+            }
+        )
+
+    monkeypatch.setattr("idcreate_client.urllib_request.urlopen", _fake_urlopen)
+
+    client = IdCreateClient(base_url="http://localhost:5003", api_key="key1", timeout_seconds=11)
+    result = client.check_identity_availability(name="alice", native_coin="VRSC", parent="bitcoins.vrsc")
+
+    assert result["available"] is True
+    assert captured["url"] == "http://localhost:5003/api/check-availability?name=alice&native_coin=VRSC&parent=bitcoins.vrsc"
+    assert captured["method"] == "GET"
+    assert captured["timeout"] == 11
+    assert captured["headers"]["X-api-key"] == "key1"
+
+
+def test_check_identity_availability_omits_parent_when_not_provided(monkeypatch):
+    captured = {}
+
+    def _fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return _FakeResponse(
+            {
+                "available": False,
+                "fully_qualified_name": "alice@",
+                "reason": "Identity already exists",
+            }
+        )
+
+    monkeypatch.setattr("idcreate_client.urllib_request.urlopen", _fake_urlopen)
+
+    client = IdCreateClient(base_url="http://localhost:5003", api_key="key1")
+    result = client.check_identity_availability(name="alice", native_coin="VRSC")
+
+    assert result["available"] is False
+    assert captured["url"] == "http://localhost:5003/api/check-availability?name=alice&native_coin=VRSC"
+    assert captured["method"] == "GET"
+
+
 def test_http_error_maps_to_idcreate_api_error(monkeypatch):
     def _fake_urlopen(req, timeout):
         raise urllib_error.HTTPError(

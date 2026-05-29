@@ -28,6 +28,18 @@ export type CreateIdentityResponse = {
 
 export type RegistrationStatusResponse = Record<string, unknown>;
 
+export type CheckIdentityAvailabilityRequest = {
+  name: string;
+  native_coin: string;
+  parent?: string;
+};
+
+export type CheckIdentityAvailabilityResponse = {
+  available: boolean;
+  fully_qualified_name: string;
+  reason: string | null;
+};
+
 export type FailuresResponse = {
   count: number;
   items: Array<Record<string, unknown>>;
@@ -95,6 +107,19 @@ export class IdCreateClient {
 
   async createIdentity(input: CreateIdentityRequest): Promise<CreateIdentityResponse> {
     return this.request<CreateIdentityResponse>("POST", "/api/register", input);
+  }
+
+  async checkIdentityAvailability(
+    input: CheckIdentityAvailabilityRequest
+  ): Promise<CheckIdentityAvailabilityResponse> {
+    const query = new URLSearchParams();
+    query.set("name", input.name);
+    query.set("native_coin", input.native_coin);
+    if (input.parent !== undefined) {
+      query.set("parent", input.parent);
+    }
+
+    return this.request<CheckIdentityAvailabilityResponse>("GET", `/api/check-availability?${query.toString()}`);
   }
 
   async getIdentityRequestStatus(requestId: string): Promise<RegistrationStatusResponse> {

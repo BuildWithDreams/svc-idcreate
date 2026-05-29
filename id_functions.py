@@ -36,7 +36,11 @@ def register_identity(request, svc):
         daemon_name,
     )
 
-    full_identity_name = f"{request.name}.{request.parent}"
+    try:
+        full_identity_name = svc._build_identity_fqn(request.name, request.parent)
+    except ValueError as exc:
+        raise svc.HTTPException(status_code=400, detail=str(exc))
+
     try:
         rpc_connection = svc._get_rpc_connection(daemon_name)
         existing_identity = rpc_connection.get_identity(full_identity_name)
@@ -51,6 +55,15 @@ def register_identity(request, svc):
     except svc.HTTPException:
         raise
     except Exception as exc:
+        if not svc._classify_getidentity_not_found(exc):
+            svc.logger.exception(
+                "api.register.identity_precheck_error name=%s parent=%s full_identity_name=%s",
+                request.name,
+                request.parent,
+                full_identity_name,
+            )
+            raise svc.HTTPException(status_code=503, detail="Identity node unreachable or degraded")
+
         # For non-existent IDs, get_identity usually raises; proceed with registration flow.
         svc.logger.info(
             "api.register.identity_precheck_not_found name=%s parent=%s full_identity_name=%s error=%s",

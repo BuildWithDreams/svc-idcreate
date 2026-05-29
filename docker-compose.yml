@@ -1,0 +1,93 @@
+# docker-compose.yml — svc-idcreate (VRSCTEST / dev200)
+# Built from: buildwithdreams/svc-idcreate:local
+# v2: adds postgres + provisioning adapter
+services:
+  idcreate-postgres:
+    image: postgres:16-alpine
+    container_name: dev200_idcreate-postgres-1
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=idcreate
+      - POSTGRES_USER=idcreate
+      - POSTGRES_PASSWORD=6a7b37bdf7679dcdb7609ba9b34705edc4fa5ab5260f35b9c32f1ec8e20b9e33
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - idcreate_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U idcreate -d idcreate"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      pbaas_network:
+
+  provisioning:
+    build:
+      context: .
+    container_name: dev200_idcreate-provisioning-1
+    restart: unless-stopped
+    ports:
+      - "5055:5055"
+    environment:
+      - PORT=5055
+      - NODE_BIN=node
+      - PROVISIONING_SCRIPT_ROOT=/workspace/provisioning
+    volumes:
+      - .:/workspace:ro
+    networks:
+      pbaas_network:
+
+  api:
+    image: buildwithdreams/svc-idcreate:local
+    container_name: dev200_idcreate-api-1
+    hostname: idcreate-api
+    depends_on:
+      idcreate-postgres:
+        condition: service_healthy
+      provisioning:
+        condition: service_started
+
+    env_file:
+      - .env
+    environment:
+      - UV_LINK_MODE=copy
+      - DATABASE_URL=${DATABASE_URL:-postgresql://idcreate:6a7b37bdf7679dcdb7609ba9b34705edc4fa5ab5260f35b9c32f1ec8e20b9e33@idcreate-postgres:5432/idcreate}
+    volumes:
+      - idcreate_data:/data
+    command: uv run fastapi run id_create_service.py --port 5003 --host 0.0.0.0
+    restart: unless-stopped
+    networks:
+      pbaas_network:
+        ipv4_address: 10.200.0.14
+
+  worker:
+    image: buildwithdreams/svc-idcreate:local
+    container_name: dev200_idcreate-worker-1
+    hostname: idcreate-worker
+    depends_on:
+      idcreate-postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - UV_LINK_MODE=copy
+      - DATABASE_URL=${DATABASE_URL:-postgresql://idcreate:6a7b37bdf7679dcdb7609ba9b34705edc4fa5ab5260f35b9c32f1ec8e20b9e33@idcreate-postgres:5432/idcreate}
+      - WORKER_POLL_INTERVAL_SECONDS=15
+    volumes:
+      - idcreate_data:/data
+    command: /bin/sh -c "while true; do uv run python worker.py; sleep $${WORKER_POLL_INTERVAL_SECONDS:-15}; done"
+    restart: unless-stopped
+    networks:
+      pbaas_network:
+
+volumes:
+  idcreate_postgres_data:
+  idcreate_data:
+
+networks:
+  pbaas_network:
+    name: net-vrsctest
+    external: true

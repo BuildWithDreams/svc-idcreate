@@ -1,6 +1,5 @@
 # docker-compose.yml — svc-idcreate (VRSCTEST / dev200)
 # Built from: buildwithdreams/svc-idcreate:local
-# v2: adds postgres + provisioning adapter
 services:
   idcreate-postgres:
     image: postgres:16-alpine
@@ -22,22 +21,6 @@ services:
     networks:
       pbaas_network:
 
-  provisioning:
-    build:
-      context: .
-    container_name: dev200_idcreate-provisioning-1
-    restart: unless-stopped
-    ports:
-      - "5055:5055"
-    environment:
-      - PORT=5055
-      - NODE_BIN=node
-      - PROVISIONING_SCRIPT_ROOT=/workspace/provisioning
-    volumes:
-      - .:/workspace:ro
-    networks:
-      pbaas_network:
-
   api:
     image: buildwithdreams/svc-idcreate:local
     container_name: dev200_idcreate-api-1
@@ -45,8 +28,6 @@ services:
     depends_on:
       idcreate-postgres:
         condition: service_healthy
-      provisioning:
-        condition: service_started
 
     env_file:
       - .env

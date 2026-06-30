@@ -21,13 +21,10 @@ import shared_functions
 import services
 import db
 
-# Provisioning endpoints
-from provisioning.router import router as provisioning_router
-
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 logging.basicConfig(
-    level=getattr(logging, os.getenv("PROVISIONING_LOG_LEVEL", "INFO").upper(), logging.INFO),
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -849,9 +846,6 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
-# Mount provisioning endpoints (/api/provisioning/*)
-app.include_router(provisioning_router)
 
 
 def _valid_api_keys() -> set[str]:

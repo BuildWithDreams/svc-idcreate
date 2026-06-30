@@ -1,7 +1,5 @@
 # Deployment Guide
 
-Provisioning routes/workflow/deployment details are now maintained in `PROVISIONING_GUIDE.md`.
-
 ## Overview
 
 This service has two runtime components:
@@ -55,7 +53,7 @@ REGISTRAR_DB_PATH=/data/registrar.db
 
 ## 2. Build and start with Docker Compose
 
-Use the sample stack (includes PostgreSQL, API, worker, and provisioning service):
+Use the sample stack (includes PostgreSQL, API, and worker):
 
 ```bash
 docker compose -f sample.docker-compose.yaml up -d --build
@@ -150,43 +148,7 @@ If a new release misbehaves:
 2. Restart API and worker containers.
 3. Validate with `/health` and one `GET /api/status/{request_id}` query.
 
-## 8. Phase 6 provisioning cutover (HTTP adapter)
-
-Use the staged rollout sequence below.
-
-### Required env
-
-```env
-PROVISIONING_ADAPTER_MODE=http
-PROVISIONING_SERVICE_URL=http://svc-provisioning:5055
-PROVISIONING_HTTP_TIMEOUT_SECONDS=10
-PROVISIONING_RETRY_COUNT=1
-PROVISIONING_LOG_LEVEL=INFO
-```
-
-### Step A: staging check
-
-```bash
-./scripts/provisioning_phase6_staging_check.sh
-```
-
-### Step B: canary checks
-
-```bash
-./scripts/provisioning_phase6_canary_check.sh
-```
-
-### Step C: full cutover validation
-
-```bash
-./scripts/provisioning_phase6_full_cutover.sh
-```
-
-### Rollback guidance
-
-If any cutover check fails, roll back to the previous deployed image/tag and keep `PROVISIONING_ADAPTER_MODE=http` with a healthy provisioning service endpoint.
-
-## 9. Alternative worker mode (cron)
+## 8. Alternative worker mode (cron)
 
 If you prefer cron over a containerized worker, run API container only and execute worker on host:
 

@@ -1,7 +1,7 @@
 # identity-creation-service
 
 Deployment instructions: see `DEPLOYMENT.md`.
-Provisioning routes/workflow/deployment guide: see `PROVISIONING_GUIDE.md`.
+Provisioning integration assessment: see `PROVISIONING_INTEGRATION_ASSESSMENT.md`.
 Thin API clients: `clients/python` and `clients/typescript`.
 Verus contentmultimap storage implementation: `CONTENTMULTIMAP_STORAGE_GUIDE.md`.
 Phased TDD storage plan: `STORAGE_IMPLEMENTATION_GUIDE.md`.
@@ -11,13 +11,9 @@ Phased TDD storage plan: `STORAGE_IMPLEMENTATION_GUIDE.md`.
 Active docs:
 - `README.md` (service overview and local usage)
 - `DEPLOYMENT.md` (runtime deployment and operations)
-- `PROVISIONING_GUIDE.md` (provisioning routes, workflow, and deployment)
+- `PROVISIONING_INTEGRATION_ASSESSMENT.md` (provisioning integration plan with external webhook service)
 - `MCP_GUIDE.md` (MCP integration and usage)
 - `mcp_server/python/README.md` (MCP server package details)
-
-Redundant or historical docs:
-- `PROVISIONING_REFACTOR_PLAN.md` (historical migration plan; superseded by `PROVISIONING_GUIDE.md`)
-- `PROVISIONING_IMPLEMENTATION_PLAN.md` (historical implementation design; superseded by `PROVISIONING_GUIDE.md`)
 
 ### MCP server (Python)
 
@@ -44,18 +40,6 @@ MCP-focused tests:
 ```bash
 uv run pytest tests/test_mcp_tools.py tests/test_mcp_server_smoke.py -q
 ```
-
-Provisioning HTTP integration tests (default path):
-
-```bash
-./scripts/run_provisioning_http_tests.sh
-```
-
-This command:
-
-- starts `svc-provisioning` from `docker-compose.yaml`
-- runs provisioning tests with `PROVISIONING_ADAPTER_MODE=http`
-- uses `PROVISIONING_SERVICE_URL=http://127.0.0.1:5055`
 
 Operational tips:
 

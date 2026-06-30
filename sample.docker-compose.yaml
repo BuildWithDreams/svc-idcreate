@@ -17,20 +17,6 @@ services:
       timeout: 5s
       retries: 10
 
-  svc-provisioning:
-    build:
-      context: ../svc-provisioning
-    container_name: syncpass-svc-provisioning
-    restart: unless-stopped
-    ports:
-      - "5055:5055"
-    environment:
-      - PORT=5055
-      - NODE_BIN=node
-      - PROVISIONING_SCRIPT_ROOT=/workspace/svc-idcreate/provisioning
-    volumes:
-      - ..:/workspace:ro
-
   idcreate-api:
     image: ${IMAGE_TAG:-registry.syncproof.net/sf/svc-idcreate:latest}
     container_name: syncpass-idcreate-api
@@ -38,8 +24,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      svc-provisioning:
-        condition: service_started
     ports:
       - "5003:5003"
     env_file:
